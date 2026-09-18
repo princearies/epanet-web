@@ -1,0 +1,113 @@
+import { useShowReport } from "src/commands/show-report";
+import { SimulationSummaryState } from "src/state/dialog";
+import { BaseDialog, SimpleDialogActions } from "../components/dialog";
+import { Loading } from "../components/elements";
+import { useTranslate } from "src/hooks/use-translate";
+
+import {
+  ErrorIcon,
+  StopSimulationIcon,
+  SuccessIcon,
+  WarningIcon,
+} from "src/icons";
+
+export const SimulationSummaryDialog = ({
+  modal,
+  onClose,
+}: {
+  modal: SimulationSummaryState;
+  onClose: () => void;
+}) => {
+  return <SimulationSummaryDialogNew modal={modal} onClose={onClose} />;
+};
+
+const SimulationSummaryDialogNew = ({
+  modal,
+  onClose,
+}: {
+  modal: SimulationSummaryState;
+  onClose: () => void;
+}) => {
+  const translate = useTranslate();
+  const showReport = useShowReport();
+
+  const isSuccess = modal.status === "success";
+  const config = {
+    success: {
+      title: translate("simulationSuccess"),
+      iconClass: "text-success",
+    },
+    warning: {
+      title: translate("simulationWarning"),
+      iconClass: "text-yellow-500",
+    },
+    failure: {
+      title: translate("simulationFailure"),
+      iconClass: "text-red-500",
+    },
+    stopped: {
+      title: translate("simulationStopped"),
+      iconClass: "text-info",
+    },
+  }[modal.status];
+
+  if (!config) return <Loading />;
+
+  const handleAction = () => {
+    if (isSuccess) onClose();
+    else showReport({ source: "resultDialog" });
+  };
+
+  const handleSecondary = () => {
+    if (isSuccess) showReport({ source: "resultDialog" });
+    else {
+      onClose();
+      (modal.onIgnore ?? modal.onContinue)?.();
+    }
+  };
+
+  return (
+    <BaseDialog
+      isOpen={true}
+      onClose={onClose}
+      title={config.title}
+      size="sm"
+      footer={
+        <SimpleDialogActions
+          autoFocusSubmit={true}
+          action={isSuccess ? translate("ok") : translate("viewReport")}
+          onAction={handleAction}
+          secondary={{
+            action: isSuccess
+              ? translate("viewReport")
+              : modal.ignoreLabel || translate("ignore"),
+            onClick: handleSecondary,
+          }}
+        />
+      }
+    >
+      <div className="p-4 text-size-base text-default">
+        <div className="flex items-start gap-2">
+          <div className={`m-width-0 mt-0.5 ${config.iconClass}`}>
+            {modal.status === "success" && <SuccessIcon />}
+            {modal.status === "warning" && <WarningIcon />}
+            {modal.status === "failure" && <ErrorIcon />}
+            {modal.status === "stopped" && <StopSimulationIcon />}
+          </div>
+          {isSuccess
+            ? translate(
+                "simulationTook",
+                ((modal.duration || 0) / 1000).toFixed(2),
+              )
+            : translate(
+                modal.status === "warning"
+                  ? "simulationWarningExplain"
+                  : modal.status === "stopped"
+                    ? "simulationStoppedExplain"
+                    : "simulationFailureExplain",
+              )}
+        </div>
+      </div>
+    </BaseDialog>
+  );
+};

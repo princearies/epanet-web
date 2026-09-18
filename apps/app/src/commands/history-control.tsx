@@ -1,0 +1,28 @@
+import { useSetAtom } from "jotai";
+import { useCallback } from "react";
+import { useUndoableTransactions } from "src/hooks/persistence/use-undoable-transactions";
+import { ephemeralStateAtom } from "src/state/drawing";
+import { Mode, modeAtom } from "src/state/mode";
+
+export const undoShortcut = "ctrl+z";
+export const redoShortcut = "ctrl+y";
+
+export const useHistoryControl = () => {
+  const { historyControl } = useUndoableTransactions();
+  const setEphemeralState = useSetAtom(ephemeralStateAtom);
+  const setMode = useSetAtom(modeAtom);
+
+  const undo = useCallback(async () => {
+    setEphemeralState({ type: "none" });
+    setMode({ mode: Mode.NONE });
+    await historyControl("undo");
+  }, [setEphemeralState, setMode, historyControl]);
+
+  const redo = useCallback(async () => {
+    setEphemeralState({ type: "none" });
+    setMode({ mode: Mode.NONE });
+    await historyControl("redo");
+  }, [setEphemeralState, setMode, historyControl]);
+
+  return { undo, redo };
+};

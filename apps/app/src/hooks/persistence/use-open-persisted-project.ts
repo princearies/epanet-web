@@ -1,0 +1,94 @@
+import { useCallback } from "react";
+import { useAtomCallback } from "jotai/utils";
+import { useDefaultPanels } from "src/panels/use-default-panels";
+import type { Getter, Setter } from "jotai";
+import * as db from "src/lib/db";
+import type { HydraulicModel } from "src/hydraulic-model";
+import type { ProjectSettings } from "@epanet-js/project-settings";
+import type { FetchProjectPhase } from "src/lib/db";
+import {
+  clearSimulationStorage,
+  loadModel,
+  resetAppState,
+} from "./use-start-new-project";
+import { captureError } from "src/infra/error-tracking";
+import { useFeatureFlag } from "src/hooks/use-feature-flags";
+
+export type OpenPersistedProjectPhase = FetchProjectPhase | "finalizing";
+
+type OpenPersistedProjectInput = {
+  file: File;
+  onProgress?: (phase: OpenPersistedProjectPhase) => void;
+};
+
+export type OpenPersistedProjectResult =
+  | {
+      status: "ok";
+      hydraulicModel: HydraulicModel;
+      projectSettings: ProjectSettings;
+      uniqueId: string | null;
+    }
+  | { status: "too-new"; fileVersion: number; appVersion: number }
+  | { status: "corrupt" | "internal"; errorDetails: string }
+  | {
+      status: "migration-failed";
+      errorDetails: string;
+      fileVersion: number;
+      appVersion: number;
+    };
+
+export const useOpenPersistedProject = () => {
+  const defaultPanelsFor = useDefaultPanels();
+  const isIdPoolsOn = useFeatureFlag("FLAG_ID_POOLS");
+  const openPersistedProject = useAtomCallback(
+    useCallback(
+      async (
+        _get: Getter,
+        set: Setter,
+        { file, onProgress }: OpenPersistedProjectInput,
+      ): Promise<OpenPersistedProjectResult> => {
+        const result = await db.openProject(file);
+
+        if (result.status !== "ok" && result.status !== "migrated") {
+          return result;
+        }
+
+        let uniqueId: string | null = null;
+        try {
+          uniqueId = await db.ensureUniqueId();
+        } catch (error) {
+          captureError(error as Error);
+        }
+
+        const fetchProject = db.fetchProject;
+        const {
+          projectSettings,
+          zones,
+          hydraulicModel,
+          factories,
+          simulationSettings,
+        } = await fetchProject({ onProgress, idPools: isIdPoolsOn });
+        onProgress?.("finalizing");
+        await clearSimulationStorage();
+        resetAppState(set, defaultPanelsFor());
+        loadModel(set, {
+          hydraulicModel,
+          factories,
+          projectSettings,
+          zones,
+          simulationSettings,
+          autoElevations: projectSettings.projection.type !== "xy-grid",
+        });
+        return {
+          status: "ok",
+          hydraulicModel,
+          projectSettings,
+          uniqueId,
+        };
+      },
+      [defaultPanelsFor, isIdPoolsOn],
+    ),
+  );
+
+  return { openPersistedProject };
+};

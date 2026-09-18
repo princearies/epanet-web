@@ -1,0 +1,62 @@
+import React from "react";
+export interface Step {
+  number: number;
+  label: string;
+  ariaLabel: string;
+}
+
+interface WizardStepIndicatorProps {
+  steps: Step[];
+  currentStep: number;
+}
+
+export const WizardStepIndicator: React.FC<WizardStepIndicatorProps> = ({
+  steps,
+  currentStep,
+}) => {
+  return (
+    <nav
+      role="navigation"
+      aria-label="Import wizard steps"
+      className={`flex items-center space-x-4 p-4 ${steps.length <= 3 ? "px-16" : ""}`}
+    >
+      {steps.map((step, index) => (
+        <React.Fragment key={step.number}>
+          <div className="flex items-center">
+            <div
+              role="tab"
+              aria-label={step.ariaLabel}
+              aria-current={currentStep === step.number ? "step" : undefined}
+              className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-medium ${
+                currentStep >= step.number
+                  ? "bg-accent text-white"
+                  : "bg-track text-subtle"
+              }`}
+            >
+              {step.number}
+            </div>
+            <span
+              className={`ml-2 text-size-base hidden lg:inline ${
+                currentStep >= step.number
+                  ? "text-accent font-medium"
+                  : "text-subtle"
+              }`}
+            >
+              {step.label}
+            </span>
+          </div>
+
+          {index < steps.length - 1 && (
+            <div className="flex-1">
+              <div
+                className={`h-px ${
+                  currentStep > step.number ? "bg-accent" : "bg-gray-300"
+                }`}
+              />
+            </div>
+          )}
+        </React.Fragment>
+      ))}
+    </nav>
+  );
+};

@@ -1,0 +1,35 @@
+import { useAtomValue } from "jotai";
+import { mapLoadingAtom } from "src/state/map";
+import { useRef } from "react";
+import { useTranslate } from "src/hooks/use-translate";
+import { RefreshIcon } from "src/icons";
+
+export const MapLoading = () => {
+  const translate = useTranslate();
+  const mapLoading = useAtomValue(mapLoadingAtom);
+  const ref = useRef();
+
+  const opacityClass = mapLoading ? "opacity-100" : "opacity-0";
+  const isHidden = !mapLoading;
+  return (
+    <div>
+      <div
+        key={ref.current}
+        aria-hidden={isHidden}
+        className={`flex items-center gap-x-2 bg-black/30 text-white
+            px-3 py-1
+            rounded
+            font-semibold
+            text-sm
+            select-none
+            transition-opacity
+            duration-1000
+            ${opacityClass}
+            pointer-events-none`}
+      >
+        <RefreshIcon className="animate-spin" />
+        {translate("updatingMap")}
+      </div>
+    </div>
+  );
+};

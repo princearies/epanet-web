@@ -1,0 +1,330 @@
+import { InpData, InpStats, nullInpData } from "./inp-data";
+import { IssuesAccumulator } from "./issues";
+import { ParseInpOptions } from "./parse-inp";
+import {
+  RowParser,
+  ignore,
+  parseDemand,
+  parseJunction,
+  parseOption,
+  parsePattern,
+  parsePipe,
+  parsePosition,
+  parseReservoir,
+  parseTank,
+  parseVertex,
+  parsePump,
+  parseCurve,
+  parseStatus,
+  parseValve,
+  unsupported,
+  parseTimeSetting,
+  parseControl,
+  parseRule,
+  parseEnergy,
+  parseEmitter,
+  parseMixing,
+  parseQuality,
+  parseReaction,
+  parseReport,
+  parseSource,
+} from "./row-parsers";
+import { LabelManager } from "@epanet-js/hydraulic-model";
+
+const commentIdentifier = ";";
+
+type SectionParsers = Record<string, RowParser>;
+
+type SectionParserDefinition = {
+  names: string[];
+  parser: RowParser;
+};
+
+const buildSectionParserDefinitions = (): SectionParserDefinition[] => [
+  { names: ["TITLE"], parser: ignore },
+  { names: ["CURVES", "CURVE"], parser: parseCurve },
+  { names: ["QUALITY"], parser: parseQuality },
+  { names: ["OPTIONS"], parser: parseOption },
+  { names: ["BACKDROP"], parser: ignore },
+  { names: ["JUNCTIONS", "JUNCTION"], parser: parseJunction },
+  { names: ["PATTERNS", "PATTERN"], parser: parsePattern },
+  { names: ["REACTIONS"], parser: parseReaction },
+  { names: ["TIMES"], parser: parseTimeSetting },
+  { names: ["COORDINATES", "COORDINATE"], parser: parsePosition },
+  { names: ["RESERVOIRS", "RESERVOIR"], parser: parseReservoir },
+  { names: ["ENERGY"], parser: parseEnergy },
+  { names: ["SOURCES"], parser: parseSource },
+  { names: ["REPORT"], parser: parseReport },
+  { names: ["VERTICES", "VERTEX"], parser: parseVertex },
+  { names: ["TANKS", "TANK"], parser: parseTank },
+  { names: ["STATUS"], parser: parseStatus },
+  { names: ["MIXING"], parser: parseMixing },
+  { names: ["LABELS"], parser: unsupported },
+  { names: ["PIPES", "PIPE"], parser: parsePipe },
+  { names: ["CONTROLS"], parser: parseControl },
+  { names: ["PUMPS", "PUMP"], parser: parsePump },
+  { names: ["RULES"], parser: parseRule },
+  { names: ["VALVES", "VALVE"], parser: parseValve },
+  { names: ["DEMANDS", "DEMAND"], parser: parseDemand },
+  { names: ["EMITTERS"], parser: parseEmitter },
+  { names: ["TAGS"], parser: unsupported },
+  { names: ["LEAKAGE"], parser: unsupported },
+];
+
+// Sections where commented-out rows represent inactive assets or references to them.
+// Excludes shared data sections like CURVES and PATTERNS whose comments are type
+// indicators (e.g. ;PUMP:), not inactive asset data.
+const INACTIVE_ASSET_SECTIONS = new Set([
+  "[JUNCTIONS]",
+  "[JUNCTION]",
+  "[RESERVOIRS]",
+  "[RESERVOIR]",
+  "[TANKS]",
+  "[TANK]",
+  "[PIPES]",
+  "[PIPE]",
+  "[PUMPS]",
+  "[PUMP]",
+  "[VALVES]",
+  "[VALVE]",
+  "[COORDINATES]",
+  "[COORDINATE]",
+  "[VERTICES]",
+  "[VERTEX]",
+  "[STATUS]",
+  "[DEMANDS]",
+  "[DEMAND]",
+  "[EMITTERS]",
+]);
+
+const buildSectionParsers = (): SectionParsers => {
+  const definitions = buildSectionParserDefinitions();
+  const result: SectionParsers = {};
+
+  definitions.forEach(({ names, parser }) => {
+    names.forEach((name) => {
+      result[`[${name}]`] = parser;
+    });
+  });
+
+  return result;
+};
+
+export const readInpData = (
+  inp: string,
+  issues: IssuesAccumulator,
+  options?: ParseInpOptions,
+): { inpData: InpData; stats: InpStats } => {
+  const rows = inp.split("\n");
+  let section: string | null = null;
+  let lastComment: string | null = null;
+  const inpData = nullInpData();
+  const sectionParsers = buildSectionParsers();
+  const counts = new Map<string, number>();
+
+  function parseRow(trimmedRow: string) {
+    if (!section) return;
+
+    const rowParserFn = sectionParsers[section];
+    if (!counts.has(section)) counts.set(section, 0);
+
+    counts.set(section, (counts.get(section) || 0) + 1);
+
+    if (!rowParserFn) return;
+
+    const startsWithComment = trimmedRow.startsWith(commentIdentifier);
+
+    rowParserFn({
+      sectionName: section,
+      trimmedRow: startsWithComment
+        ? trimmedRow.substring(1).trim()
+        : trimmedRow,
+      inpData,
+      issues,
+      options,
+      isCommented: startsWithComment,
+      previousComment: lastComment ?? undefined,
+    });
+    lastComment = null;
+  }
+
+  for (const row of rows) {
+    const trimmedRow = row.trim();
+
+    if (isEmpty(trimmedRow)) continue;
+
+    if (isLineComment(trimmedRow)) {
+      if (options?.customerPoints && trimmedRow === ";[CUSTOMERS]") {
+        section = "CUSTOMERS_COMMENTED";
+        continue;
+      }
+      if (options?.customerPoints && trimmedRow === ";[CUSTOMERS_DEMANDS]") {
+        section = "CUSTOMERS_DEMANDS_COMMENTED";
+        continue;
+      }
+      if (section === "CUSTOMERS_COMMENTED") {
+        parseCommentedCustomerPoint(
+          trimmedRow,
+          inpData,
+          options?.labelMaxLength,
+        );
+        continue;
+      }
+      if (section === "CUSTOMERS_DEMANDS_COMMENTED") {
+        parseCommentedCustomerDemand(
+          trimmedRow,
+          inpData,
+          options?.labelMaxLength,
+        );
+        continue;
+      }
+
+      if (isLineHeader(trimmedRow)) {
+        continue;
+      }
+
+      if (
+        options?.inactiveAssets === true &&
+        section &&
+        INACTIVE_ASSET_SECTIONS.has(section)
+      )
+        parseRow(trimmedRow);
+      lastComment = trimmedRow;
+      continue;
+    }
+
+    if (isEnd(trimmedRow)) {
+      section = null;
+      lastComment = null;
+      continue;
+    }
+
+    const newSectionName = detectNewSectionName(
+      trimmedRow,
+      issues,
+      sectionParsers,
+    );
+    if (newSectionName) {
+      section = newSectionName;
+      lastComment = null;
+      continue;
+    }
+    parseRow(trimmedRow);
+  }
+
+  return { inpData, stats: { counts } };
+};
+
+const isEnd = (trimmedRow: string) => {
+  return trimmedRow.toUpperCase().includes("[END]");
+};
+
+const isLineComment = (trimmedRow: string) =>
+  trimmedRow.startsWith(commentIdentifier);
+
+const isLineHeader = (trimmedRow: string): boolean => {
+  if (!isLineComment(trimmedRow)) return false;
+  const uncommentedRow = trimmedRow.substring(1).trim();
+  const uncommentedRowUpper = uncommentedRow.toUpperCase();
+
+  return (
+    uncommentedRowUpper.startsWith("ID") ||
+    uncommentedRowUpper.startsWith("NODE") ||
+    uncommentedRowUpper.startsWith("LINK") ||
+    uncommentedRow.startsWith("-")
+  );
+};
+
+const isEmpty = (trimmedRow: string) => trimmedRow === "";
+
+const detectNewSectionName = (
+  trimmedRow: string,
+  issues: IssuesAccumulator,
+  sectionParsers: SectionParsers,
+): string | null => {
+  if (!trimmedRow.startsWith("[")) return null;
+  const normalizedRow = trimmedRow.toUpperCase();
+
+  const sectionName = Object.keys(sectionParsers).find((name) =>
+    normalizedRow.includes(name),
+  );
+  if (sectionName === undefined) {
+    issues.addUsedSection(trimmedRow);
+    return trimmedRow;
+  }
+  return sectionName;
+};
+
+const parseCommentedCustomerPoint = (
+  trimmedRow: string,
+  inpData: InpData,
+  labelMaxLength?: number,
+) => {
+  const line = trimmedRow.substring(1);
+  if (line.startsWith("Id\t") || line.startsWith("[CUSTOMERS]")) return;
+
+  const parts = line.split("\t");
+  if (parts.length < 4) return;
+
+  const [
+    rawLabel,
+    x,
+    y,
+    demand,
+    pipeId = "",
+    junctionId = "",
+    snapX = "",
+    snapY = "",
+  ] = parts;
+
+  const label = LabelManager.sanitizeLabel(
+    rawLabel,
+    "customerPoint",
+    labelMaxLength,
+  );
+
+  const hasConnection = pipeId && junctionId && snapX && snapY;
+
+  if (hasConnection) {
+    inpData.customerPoints.push({
+      label,
+      coordinates: [parseFloat(x), parseFloat(y)],
+      baseDemand: parseFloat(demand),
+      pipeId,
+      junctionId,
+      snapPoint: [parseFloat(snapX), parseFloat(snapY)],
+    });
+  } else {
+    inpData.customerPoints.push({
+      label,
+      coordinates: [parseFloat(x), parseFloat(y)],
+      baseDemand: parseFloat(demand),
+    });
+  }
+};
+
+const parseCommentedCustomerDemand = (
+  trimmedRow: string,
+  inpData: InpData,
+  labelMaxLength?: number,
+) => {
+  const line = trimmedRow.substring(1);
+  if (line.startsWith("Id\t") || line.startsWith("[CUSTOMERS_DEMANDS]")) return;
+
+  const parts = line.split("\t");
+  if (parts.length < 2) return;
+
+  const [rawLabel, baseDemand, patternId] = parts;
+  const label = LabelManager.sanitizeLabel(
+    rawLabel,
+    "customerPoint",
+    labelMaxLength,
+  );
+
+  const demands = inpData.customerDemands.get(label) || [];
+  demands.push({
+    baseDemand: parseFloat(baseDemand),
+    patternLabel: patternId || undefined,
+  });
+  inpData.customerDemands.set(label, demands);
+};

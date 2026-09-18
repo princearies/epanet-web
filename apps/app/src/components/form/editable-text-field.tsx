@@ -1,0 +1,237 @@
+import {
+  ChangeEventHandler,
+  KeyboardEventHandler,
+  useRef,
+  useState,
+  useEffect,
+} from "react";
+import clsx from "clsx";
+
+type StyleOptions = {
+  textSize?: "xs" | "sm" | "md";
+  padding?: "md" | "sm";
+  border?: "sm" | "none";
+  ghostBorder?: boolean;
+  variant?: "default" | "warning";
+  disabled?: boolean;
+  readOnly?: boolean;
+  fontWeight?: "normal" | "semibold";
+};
+
+export const EditableTextField = ({
+  label,
+  value,
+  onChangeValue,
+  readOnly = false,
+  disabled = false,
+  styleOptions = {},
+  tabIndex = 0,
+  sanitize,
+  onDirty,
+  onReset,
+  hasError = false,
+  allowEmpty = false,
+  placeholder,
+}: {
+  label: string;
+  value: string;
+  onChangeValue?: (newValue: string) => boolean;
+  readOnly?: boolean;
+  disabled?: boolean;
+  styleOptions?: Partial<StyleOptions>;
+  tabIndex?: number;
+  sanitize?: (raw: string) => string;
+  onDirty?: () => void;
+  onReset?: () => void;
+  hasError?: boolean;
+  allowEmpty?: boolean;
+  placeholder?: string;
+}) => {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [inputValue, setInputValue] = useState(value);
+  const [isDirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    if (!isDirty && document.activeElement !== inputRef.current) {
+      setInputValue(value);
+    }
+  }, [value, isDirty]);
+
+  const handleKeyDown: KeyboardEventHandler<HTMLInputElement> = (e) => {
+    if (e.key === "Escape") {
+      resetInput();
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      handleCommitLastChange();
+      return;
+    }
+
+    if ((e.ctrlKey || e.metaKey) && (e.key === "z" || e.key === "y")) {
+      e.preventDefault();
+    }
+  };
+
+  const resetInput = () => {
+    setInputValue(value);
+    setDirty(false);
+    onReset?.();
+    blurInput();
+  };
+
+  const handleBlur = () => {
+    if (isDirty) {
+      handleCommitLastChange();
+    } else {
+      resetInput();
+    }
+  };
+
+  const handleFocus = () => {
+    setTimeout(() => inputRef.current && inputRef.current.select(), 0);
+  };
+
+  const handleCommitLastChange = () => {
+    if (hasError) {
+      return;
+    }
+    const trimmedValue = inputValue.trim();
+    if ((allowEmpty || trimmedValue) && trimmedValue !== value) {
+      const hasValidationError = onChangeValue?.(trimmedValue);
+      if (hasValidationError) {
+        return;
+      }
+    }
+    setDirty(false);
+    blurInput();
+  };
+
+  const blurInput = () => {
+    if (inputRef.current !== document.activeElement) return;
+
+    setTimeout(() => inputRef.current?.blur(), 0);
+  };
+
+  const handleInputChange: ChangeEventHandler<HTMLInputElement> = (e) => {
+    const newValue = sanitize ? sanitize(e.target.value) : e.target.value;
+    setInputValue(newValue);
+    setDirty(true);
+    onDirty?.();
+  };
+
+  const variant = hasError ? "warning" : styleOptions.variant;
+
+  if (readOnly) {
+    return (
+      <span
+        className={styledReadOnlyText(styleOptions)}
+        aria-label={`Value for: ${label}`}
+      >
+        {value}
+      </span>
+    );
+  }
+
+  return (
+    <input
+      onChange={handleInputChange}
+      onKeyDown={handleKeyDown}
+      spellCheck="false"
+      type="text"
+      aria-label={`Value for: ${label}`}
+      aria-invalid={hasError || undefined}
+      readOnly={readOnly}
+      disabled={disabled}
+      onBlur={handleBlur}
+      ref={inputRef}
+      value={inputValue}
+      placeholder={placeholder}
+      onFocus={handleFocus}
+      tabIndex={tabIndex}
+      className={styledInput({
+        ...styleOptions,
+        variant,
+        disabled,
+        readOnly,
+      })}
+    />
+  );
+};
+
+function styledReadOnlyText({
+  padding = "md",
+  textSize = "xs",
+  fontWeight = "normal",
+}: Partial<StyleOptions> = {}) {
+  return clsx(
+    "text-default",
+    {
+      "p-1": padding === "sm",
+      "p-2": padding === "md",
+    },
+    {
+      "text-size-small": textSize === "xs",
+      "text-size-base": textSize === "sm",
+      "text-md": textSize === "md",
+    },
+    {
+      "font-normal": fontWeight === "normal",
+      "font-semibold": fontWeight === "semibold",
+    },
+    "block overflow-hidden whitespace-nowrap text-ellipsis w-full border border-transparent",
+  );
+}
+
+function styledInput({
+  padding = "md",
+  border = "sm",
+  variant = "default",
+  textSize = "xs",
+  ghostBorder = false,
+  disabled = false,
+  readOnly = false,
+  fontWeight = "normal",
+}: StyleOptions = {}) {
+  const isInteractive = !disabled && !readOnly;
+
+  return clsx(
+    disabled ? "text-disabled cursor-not-allowed" : "text-default",
+    readOnly && "cursor-default",
+    {
+      "p-1": padding === "sm",
+      "p-2": padding === "md",
+    },
+    {
+      "border-none": border === "none",
+      "border focus-visible:border-transparent":
+        border === "sm" && isInteractive,
+      border: border === "sm" && !isInteractive,
+    },
+    ghostBorder && variant !== "warning"
+      ? "border-transparent bg-transparent"
+      : variant === "warning"
+        ? "border-warning"
+        : isInteractive
+          ? "border-strong hover:border"
+          : "border-transparent",
+    !ghostBorder && variant !== "warning" && "bg-popover",
+    isInteractive && {
+      "focus-visible:bg-purple-300/10 dark:focus-visible:bg-purple-700/40 focus-visible:ring-accent":
+        variant === "default",
+      "focus-visible:bg-warning-subtle focus-visible:ring-warning":
+        variant === "warning",
+    },
+    {
+      "text-size-small": textSize === "xs",
+      "text-size-base": textSize === "sm",
+      "text-md": textSize === "md",
+    },
+    {
+      "font-normal": fontWeight === "normal",
+      "font-semibold": fontWeight === "semibold",
+    },
+    "rounded-xs block overflow-hidden whitespace-nowrap text-ellipsis w-full",
+    isInteractive && "focus-visible:ring-inset",
+  );
+}

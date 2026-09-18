@@ -1,0 +1,248 @@
+import * as DD from "@radix-ui/react-dropdown-menu";
+import * as Tooltip from "@radix-ui/react-tooltip";
+import { useAtomValue, useSetAtom } from "jotai";
+import { isPlayingAtom } from "src/state/simulation-playback";
+
+import {
+  ChevronDownIcon,
+  ScenarioIcon,
+  AddScenarioIcon,
+  MainModelIcon,
+  MoreActionsIcon,
+  DeleteIcon,
+  RenameIcon,
+} from "src/icons";
+import { useTranslate } from "src/hooks/use-translate";
+import { useUserTracking } from "src/infra/user-tracking";
+import { useScenarioOperations } from "src/hooks/use-scenario-operations";
+import { worktreeAtom, scenariosListAtom } from "src/state/scenarios";
+import { dialogAtom } from "src/state/dialog";
+import { useCreateScenario } from "src/commands/create-scenario";
+import {
+  Button,
+  DDContent,
+  DDSeparator,
+  StyledItem,
+  StyledTooltipArrow,
+  TContent,
+} from "../elements";
+
+export const ScenarioSwitcher = () => {
+  const translate = useTranslate();
+  const userTracking = useUserTracking();
+  const worktree = useAtomValue(worktreeAtom);
+  const scenariosList = useAtomValue(scenariosListAtom);
+  const setDialog = useSetAtom(dialogAtom);
+  const createScenario = useCreateScenario();
+
+  const {
+    scenariosAvailable,
+    switchToMain,
+    switchToBranch,
+    deleteScenarioById,
+    renameScenarioById,
+  } = useScenarioOperations();
+
+  const isPlaying = useAtomValue(isPlayingAtom);
+
+  const activeBranchId = worktree.activeBranchId;
+  const isMainActive = activeBranchId === worktree.mainId;
+
+  const activeDisplayName = isMainActive
+    ? translate("scenarios.main")
+    : (worktree.branches.get(activeBranchId)?.name ??
+      translate("scenarios.main"));
+
+  const handleSelectMain = () => {
+    if (isMainActive) return;
+
+    userTracking.capture({
+      name: "scenario.switched",
+      scenarioId: null,
+      scenarioName: "Main",
+    });
+
+    switchToMain();
+  };
+
+  const handleSelectScenario = (scenarioId: string) => {
+    if (activeBranchId === scenarioId) return;
+
+    const scenario = worktree.branches.get(scenarioId);
+    userTracking.capture({
+      name: "scenario.switched",
+      scenarioId,
+      scenarioName: scenario?.name,
+    });
+
+    switchToBranch(scenarioId);
+  };
+
+  const handleCreateScenario = () => {
+    createScenario({ source: "scenario-switcher" });
+  };
+
+  const handleDeleteScenario = (scenarioId: string) => {
+    void deleteScenarioById(scenarioId);
+  };
+
+  const openDeleteConfirmation = (scenarioId: string, scenarioName: string) => {
+    setDialog({
+      type: "deleteScenarioConfirmation",
+      scenarioId,
+      scenarioName,
+      onConfirm: handleDeleteScenario,
+    });
+  };
+
+  const handleRenameScenario = (scenarioId: string, newName: string) => {
+    renameScenarioById(scenarioId, newName);
+  };
+
+  const openRenameDialog = (scenarioId: string, scenarioName: string) => {
+    setDialog({
+      type: "renameScenario",
+      scenarioId,
+      currentName: scenarioName,
+      onConfirm: handleRenameScenario,
+    });
+  };
+
+  if (!scenariosAvailable) return null;
+
+  const hasScenarios = scenariosList.length > 0;
+
+  if (!hasScenarios) {
+    return (
+      <div className="min-w-44 flex items-center">
+        <Tooltip.Root delayDuration={200}>
+          <Tooltip.Trigger asChild>
+            <button
+              onClick={handleCreateScenario}
+              className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 text-size-base text-accent-hover bg-accent-tint hover:bg-purple-100 border border-purple-200 rounded-md transition-colors"
+            >
+              <ScenarioIcon size="sm" />
+              <span>{translate("scenarios.enableScenarios")}</span>
+            </button>
+          </Tooltip.Trigger>
+          <TContent side="top">
+            <StyledTooltipArrow />
+            {translate("scenarios.enableScenarios")}
+          </TContent>
+        </Tooltip.Root>
+      </div>
+    );
+  }
+
+  return (
+    <Tooltip.Root delayDuration={200}>
+      <div className="w-44 h-10 group bn flex items-stretch py-1 focus:outline-hidden">
+        <DD.Root
+          onOpenChange={(open) => {
+            if (open) {
+              userTracking.capture({ name: "scenarioSwitcher.opened" });
+            }
+          }}
+        >
+          <Tooltip.Trigger asChild>
+            <DD.Trigger asChild disabled={isPlaying}>
+              <Button
+                variant="quiet"
+                className="w-full justify-between"
+                disabled={isPlaying}
+              >
+                <div className="flex items-center gap-1">
+                  {isMainActive ? (
+                    <MainModelIcon size="sm" />
+                  ) : (
+                    <ScenarioIcon size="sm" />
+                  )}
+                  <span className="truncate text-size-base">
+                    {activeDisplayName}
+                  </span>
+                </div>
+                <ChevronDownIcon size="sm" />
+              </Button>
+            </DD.Trigger>
+          </Tooltip.Trigger>
+          <DD.Portal>
+            <DDContent align="start" side="top" className="min-w-64">
+              <StyledItem onSelect={handleSelectMain}>
+                <div
+                  className={`flex items-center w-full gap-2 ${isMainActive ? "text-accent-hover" : ""}`}
+                >
+                  <MainModelIcon size="sm" />
+                  <div className="flex-1">{translate("scenarios.main")}</div>
+                </div>
+              </StyledItem>
+
+              {scenariosList.map((scenario, index) => (
+                <StyledItem
+                  key={scenario.id}
+                  onSelect={() => handleSelectScenario(scenario.id)}
+                  className="group/scenario"
+                >
+                  <div
+                    className={`flex items-center w-full gap-2 ${activeBranchId === scenario.id ? "text-accent-hover" : ""}`}
+                  >
+                    <span
+                      className={`font-mono text-size-base pl-1 ${activeBranchId === scenario.id ? "text-purple-400" : "text-subtle"}`}
+                    >
+                      {index === scenariosList.length - 1 ? "└──" : "├──"}
+                    </span>
+                    <div className="flex-1">{scenario.name}</div>
+                    <DD.Root>
+                      <DD.Trigger asChild>
+                        <button
+                          className="opacity-0 group-hover/scenario:opacity-100 data-[state=open]:opacity-100 p-1 rounded-sm hover:bg-gray-300 dark:hover:bg-gray-500 text-subtle"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <MoreActionsIcon size="sm" />
+                        </button>
+                      </DD.Trigger>
+                      <DD.Portal>
+                        <DDContent side="right" align="start" sideOffset={4}>
+                          <StyledItem
+                            onSelect={() =>
+                              openRenameDialog(scenario.id, scenario.name)
+                            }
+                          >
+                            <RenameIcon size="sm" />
+                            <span>{translate("scenarios.rename")}</span>
+                          </StyledItem>
+
+                          <StyledItem
+                            onSelect={() =>
+                              openDeleteConfirmation(scenario.id, scenario.name)
+                            }
+                            className="text-error"
+                          >
+                            <DeleteIcon size="sm" />
+                            <span>{translate("scenarios.delete")}</span>
+                          </StyledItem>
+                        </DDContent>
+                      </DD.Portal>
+                    </DD.Root>
+                  </div>
+                </StyledItem>
+              ))}
+
+              <DDSeparator />
+
+              <StyledItem onSelect={handleCreateScenario}>
+                <div className="flex items-center gap-2">
+                  <AddScenarioIcon size="sm" />
+                  <span>{translate("scenarios.createNew")}</span>
+                </div>
+              </StyledItem>
+            </DDContent>
+          </DD.Portal>
+        </DD.Root>
+      </div>
+      <TContent side="top">
+        <StyledTooltipArrow />
+        {translate("scenarios.switcherTooltip")}
+      </TContent>
+    </Tooltip.Root>
+  );
+};

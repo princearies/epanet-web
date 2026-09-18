@@ -1,0 +1,84 @@
+import { createEmptyControls, Controls } from "@epanet-js/hydraulic-model";
+import { serializeControls } from "./to-rows";
+
+describe("serializeControls", () => {
+  it("produces a JSON string that round-trips through JSON.parse", () => {
+    const IDS = { P1: 7 } as const;
+    const controls: Controls = [
+      {
+        id: "ctrl-1",
+        type: "timed-setting",
+        linkId: IDS.P1,
+        steps: [
+          { time: 3600, status: "off", setting: 1 },
+          { time: 7200, status: "on", setting: 1.5 },
+        ],
+      },
+    ];
+
+    const data = serializeControls(controls);
+
+    expect(JSON.parse(data)).toEqual(controls);
+  });
+
+  it("round-trips a level-setting control", () => {
+    const controls: Controls = [
+      {
+        id: "ctrl-1",
+        type: "level-setting",
+        linkId: 7,
+        tankId: 12,
+        on: { level: 2, setting: 1.5 },
+        off: { level: 9 },
+      },
+    ];
+
+    const data = serializeControls(controls);
+
+    expect(JSON.parse(data)).toEqual(controls);
+  });
+
+  it("round-trips a target-node control", () => {
+    const controls: Controls = [
+      {
+        id: "ctrl-1",
+        type: "target-node",
+        linkId: 7,
+        targetId: 12,
+      },
+    ];
+
+    const data = serializeControls(controls);
+
+    expect(JSON.parse(data)).toEqual(controls);
+  });
+
+  it("serializes empty controls as an empty array", () => {
+    const data = serializeControls(createEmptyControls());
+    expect(JSON.parse(data)).toEqual([]);
+  });
+
+  it("throws when the in-memory shape is malformed", () => {
+    expect(() =>
+      serializeControls([
+        {
+          type: "timed-setting",
+          linkId: 1,
+          steps: [{ time: 0, status: "on" }],
+        } as unknown as Controls[number],
+      ]),
+    ).toThrow(/Controls: data does not match schema/);
+  });
+
+  it("throws when the control type is unknown", () => {
+    expect(() =>
+      serializeControls([
+        {
+          type: "mystery",
+          linkId: 1,
+          steps: [],
+        } as unknown as Controls[number],
+      ]),
+    ).toThrow(/Controls: data does not match schema/);
+  });
+});

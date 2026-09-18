@@ -1,0 +1,345 @@
+import { useMemo, useCallback, useState, useRef, useEffect } from "react";
+import {
+  DataGrid,
+  type DataGridRef,
+  floatColumn,
+  filterableSelectColumn,
+  type GridColumn,
+} from "src/components/data-grid";
+import { Button } from "src/components/elements";
+import { Patterns, PatternId } from "src/hydraulic-model";
+import { useTranslate } from "src/hooks/use-translate";
+import { DeleteIcon, AddIcon } from "src/icons";
+import { PropertyComparison } from "src/hooks/use-asset-comparison";
+import { calculateAverageDemand, Demand } from "@epanet-js/hydraulic-model";
+import { UnitsSpec } from "@epanet-js/project-settings";
+import { QuantityRow } from "./ui-components";
+import {
+  NestedSection,
+  BlockComparisonField,
+} from "src/components/form/fields";
+
+type DemandCategoryRow = {
+  baseDemand: number | null;
+  patternId: PatternId | null;
+};
+
+type Props = {
+  demands: Demand[];
+  patterns: Patterns;
+  onDemandsChange: (newDemands: Demand[]) => void;
+  comparison?: PropertyComparison;
+  readOnly?: boolean;
+};
+
+const toRow = (demand: Demand, patterns: Patterns): DemandCategoryRow => {
+  if (demand.patternId) {
+    const pattern = patterns.get(demand.patternId);
+    if (pattern) {
+      return {
+        baseDemand: demand.baseDemand,
+        patternId: demand.patternId,
+      };
+    }
+  }
+  return {
+    baseDemand: demand.baseDemand,
+    patternId: null,
+  };
+};
+
+const fromRow = (row: DemandCategoryRow): Demand => {
+  return {
+    baseDemand: row.baseDemand ?? 0,
+    patternId: row.patternId ?? undefined,
+  };
+};
+
+const createDefaultRow = (): DemandCategoryRow => ({
+  baseDemand: 0,
+  patternId: null,
+});
+
+export const DemandCategoriesEditor = ({
+  demands,
+  patterns,
+  onDemandsChange,
+  comparison,
+  readOnly = false,
+}: Props) => {
+  const translate = useTranslate();
+  const [showEmptyGrid, setShowEmptyGrid] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const gridRef = useRef<DataGridRef>(null);
+
+  useEffect(function clearSelectionOnClickOutside() {
+    const handleMouseDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+
+      if (containerRef.current?.contains(target)) {
+        return;
+      }
+
+      if (
+        (target as Element).closest?.("[data-radix-popper-content-wrapper]")
+      ) {
+        return;
+      }
+
+      gridRef.current?.clearSelection();
+    };
+
+    document.addEventListener("mousedown", handleMouseDown);
+    return () => document.removeEventListener("mousedown", handleMouseDown);
+  }, []);
+
+  const rowData = useMemo(() => {
+    if (demands.length === 0 && showEmptyGrid) {
+      return [createDefaultRow()];
+    }
+    return demands.map((demand) => toRow(demand, patterns));
+  }, [demands, patterns, showEmptyGrid]);
+
+  const handleAddFirstDemand = useCallback(() => {
+    setShowEmptyGrid(true);
+  }, []);
+
+  const patternOptions = useMemo(() => {
+    const options: { value: number; label: string }[] = [];
+    for (const [patternId, { label, type }] of patterns.entries()) {
+      if (type === "demand") {
+        options.push({ value: patternId, label });
+      }
+    }
+    return options;
+  }, [patterns]);
+
+  const handleDeleteRow = useCallback(
+    (rowIndex: number) => {
+      const newRows = rowData.filter((_, i) => i !== rowIndex);
+      const newDemands = newRows.map((row) => fromRow(row));
+      onDemandsChange(newDemands);
+    },
+    [rowData, onDemandsChange],
+  );
+
+  const handleInsertRowAbove = useCallback(
+    (rowIndex: number) => {
+      const newRow = createDefaultRow();
+      const newRows = [
+        ...rowData.slice(0, rowIndex),
+        newRow,
+        ...rowData.slice(rowIndex),
+      ];
+      const newDemands = newRows.map((row) => fromRow(row));
+      onDemandsChange(newDemands);
+    },
+    [rowData, onDemandsChange],
+  );
+
+  const handleInsertRowBelow = useCallback(
+    (rowIndex: number) => {
+      const newRow = createDefaultRow();
+      const newRows = [
+        ...rowData.slice(0, rowIndex + 1),
+        newRow,
+        ...rowData.slice(rowIndex + 1),
+      ];
+      const newDemands = newRows.map((row) => fromRow(row));
+      onDemandsChange(newDemands);
+    },
+    [rowData, onDemandsChange],
+  );
+
+  const isDeleteDisabled = useCallback(
+    (rowIndex: number) => {
+      if (rowData.length > 1) return false;
+      const row = rowData[rowIndex];
+      return row?.baseDemand === 0 && row?.patternId === null;
+    },
+    [rowData],
+  );
+
+  const rowActions = useMemo(
+    () => [
+      {
+        label: translate("delete"),
+        icon: <DeleteIcon size="sm" />,
+        onSelect: handleDeleteRow,
+        disabled: isDeleteDisabled,
+        variant: "destructive" as const,
+      },
+      {
+        label: translate("insertRowAbove"),
+        icon: <AddIcon size="sm" />,
+        onSelect: handleInsertRowAbove,
+      },
+      {
+        label: translate("insertRowBelow"),
+        icon: <AddIcon size="sm" />,
+        onSelect: handleInsertRowBelow,
+      },
+    ],
+    [
+      translate,
+      handleDeleteRow,
+      handleInsertRowAbove,
+      handleInsertRowBelow,
+      isDeleteDisabled,
+    ],
+  );
+
+  const columns: GridColumn<DemandCategoryRow>[] = useMemo(
+    () => [
+      floatColumn("baseDemand", {
+        header: translate("demand"),
+        size: 60,
+        emptyValue: 0,
+      }),
+      filterableSelectColumn("patternId", {
+        header: translate("timePattern"),
+        size: 80,
+        options: patternOptions,
+        placeholder: translate("constant"),
+        emptyOptionLabel: translate("constant"),
+        emptyValue: null,
+      }),
+    ],
+    [translate, patternOptions],
+  );
+
+  const createRow = createDefaultRow;
+
+  const handleChange = useCallback(
+    (newRows: DemandCategoryRow[]) => {
+      const newDemands = newRows.map((row) => fromRow(row));
+
+      const isSingleDefaultDemand =
+        newDemands.length === 1 &&
+        newDemands[0].baseDemand === 0 &&
+        newDemands[0].patternId === undefined;
+
+      if (isSingleDefaultDemand) {
+        setShowEmptyGrid(true);
+        if (demands.length !== 0) onDemandsChange([]);
+        return;
+      }
+
+      setShowEmptyGrid(false);
+
+      const areEqual =
+        newDemands.length === demands.length &&
+        newDemands.every(
+          (d, i) =>
+            d.baseDemand === demands[i].baseDemand &&
+            d.patternId === demands[i].patternId,
+        );
+
+      if (areEqual) {
+        return;
+      }
+
+      onDemandsChange(newDemands);
+    },
+    [onDemandsChange, demands],
+  );
+
+  const handleDelete = useCallback(
+    (rowsToDelete: DemandCategoryRow[]) => {
+      const toRemove = new Set(rowsToDelete);
+      handleChange(rowData.filter((row) => !toRemove.has(row)));
+    },
+    [handleChange, rowData],
+  );
+
+  if (demands.length === 0 && !showEmptyGrid) {
+    if (readOnly) {
+      return null;
+    }
+
+    return (
+      <Button
+        variant="default"
+        size="sm"
+        onClick={handleAddFirstDemand}
+        className="w-full justify-center"
+      >
+        <AddIcon size="sm" />
+        {translate("addDirectDemand")}
+      </Button>
+    );
+  }
+
+  const sharedProps = {
+    data: rowData,
+    columns,
+    onChange: handleChange,
+    onDelete: handleDelete,
+    createRow,
+    rowActions,
+    addRowLabel: translate("addDemandCategory"),
+    variant: "inline" as const,
+    gutterColumn: "numbered" as const,
+    readOnly,
+  };
+
+  return (
+    <BlockComparisonField hasChanged={comparison?.hasChanged ?? false}>
+      <div ref={containerRef} className="flex flex-col gap-2">
+        <label
+          className="text-size-base text-subtle w-full shrink-0"
+          aria-label={`label: ${translate("demandCategories")}`}
+        >
+          {translate("demandCategories")}
+        </label>
+        <NestedSection className="pb-2" indentation={0}>
+          <DataGrid<DemandCategoryRow> ref={gridRef} {...sharedProps} />
+        </NestedSection>
+      </div>
+    </BlockComparisonField>
+  );
+};
+
+export const DemandsEditor = ({
+  demands,
+  patterns,
+  units,
+  name,
+  onChange,
+  demandComparator,
+  readOnly,
+}: {
+  demands: Demand[];
+  patterns: Patterns;
+  units: UnitsSpec;
+  name: string;
+  onChange: (demands: Demand[]) => void;
+  demandComparator: (demands: number) => PropertyComparison;
+  readOnly: boolean;
+}) => {
+  const averageDemand = useMemo(
+    () => calculateAverageDemand(demands, patterns),
+    [demands, patterns],
+  );
+
+  const demandComparison = demandComparator(averageDemand);
+
+  return (
+    <BlockComparisonField hasChanged={demandComparison.hasChanged}>
+      <DemandCategoriesEditor
+        demands={demands}
+        patterns={patterns}
+        onDemandsChange={onChange}
+        comparison={demandComparison}
+        readOnly={readOnly}
+      />
+      <QuantityRow
+        name={name}
+        value={averageDemand}
+        unit={units.directDemand}
+        comparison={demandComparison}
+        readOnly={true}
+      />
+    </BlockComparisonField>
+  );
+};

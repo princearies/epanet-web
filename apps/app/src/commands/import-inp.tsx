@@ -1,0 +1,348 @@
+import { useCallback, useContext } from "react";
+import { useSetAtom } from "jotai";
+import { useAtomCallback } from "jotai/utils";
+import { dialogAtom } from "src/state/dialog";
+import { inpFileInfoAtom, projectFileInfoAtom } from "src/state/file-system";
+import { savedProjectRevisionAtom } from "src/state/project-revision";
+import { userSettingsAtom } from "src/state/user-settings";
+import { captureError } from "src/infra/error-tracking";
+import { errorName, handleError } from "src/infra/errors";
+import { FileWithHandle } from "browser-fs-access";
+import { useTranslate } from "src/hooks/use-translate";
+import {
+  ParserIssues,
+  parseInp,
+  parseCoordinatesGeoJson,
+} from "src/import/inp";
+import type { ParseInpResult } from "src/import/inp";
+import { FeatureCollection } from "geojson";
+import { getExtent } from "@epanet-js/geometry";
+import { LngLatBoundsLike } from "mapbox-gl";
+import { MapContext, captureThumbnail } from "src/map";
+import { ImportInpCompleted, useUserTracking } from "src/infra/user-tracking";
+import { InpStats } from "src/import/inp/inp-data";
+import { ProjectSettings } from "@epanet-js/project-settings";
+import { chooseUnitSystem } from "src/simulation/build-inp";
+import { notify } from "src/components/notifications";
+import { WarningIcon } from "src/icons";
+import { useRecentFiles } from "src/hooks/use-recent-files";
+import {
+  type Projection,
+  createProjectionMapper,
+} from "@epanet-js/projections";
+import { transformCoordinates } from "src/hydraulic-model/mutations/transform-coordinates";
+import { useStartNewProject } from "src/hooks/persistence/use-start-new-project";
+import { useLabelMaxLength } from "src/hooks/use-label-max-length";
+import { useFeatureFlag } from "src/hooks/use-feature-flags";
+
+export const inpExtension = ".inp";
+
+const fileReadErrorName = "NotReadableError";
+
+export const useImportInp = () => {
+  const translate = useTranslate();
+  const setDialogState = useSetAtom(dialogAtom);
+  const map = useContext(MapContext);
+  const setInpFileInfo = useSetAtom(inpFileInfoAtom);
+  const setProjectFileInfo = useSetAtom(projectFileInfoAtom);
+  const setSavedProjectRevision = useSetAtom(savedProjectRevisionAtom);
+  const userTracking = useUserTracking();
+  const { startNewProject } = useStartNewProject();
+  const { addRecent } = useRecentFiles();
+  const labelMaxLength = useLabelMaxLength();
+  const isIdPoolsOn = useFeatureFlag("FLAG_ID_POOLS");
+
+  const handleImportComplete = useAtomCallback(
+    useCallback((get, set, issues: ParserIssues | null) => {
+      const showFormat = get(userSettingsAtom).showFileFormatUpdated;
+      const openFormatDialog = () =>
+        set(dialogAtom, { type: "fileFormatUpdated" });
+
+      if (!issues) {
+        if (showFormat) openFormatDialog();
+        else set(dialogAtom, null);
+        return;
+      }
+
+      set(dialogAtom, {
+        type: "inpIssues",
+        issues,
+        onAfterClose: showFormat ? openFormatDialog : undefined,
+      });
+    }, []),
+  );
+
+  const completeImport = useCallback(
+    async (
+      file: FileWithHandle,
+      result: ParseInpResult,
+      options?: { autoElevations?: boolean },
+    ) => {
+      const {
+        hydraulicModel,
+        factories,
+        projectSettings,
+        simulationSettings,
+        issues,
+        isMadeByApp,
+      } = result;
+
+      const projectName = file.name.replace(/\.[^.]+$/, "");
+
+      try {
+        const started = await startNewProject({
+          hydraulicModel,
+          factories,
+          projectSettings: { ...projectSettings, name: projectName },
+          simulationSettings,
+          autoElevations: options?.autoElevations,
+        });
+        if (!started) {
+          setDialogState(null);
+          return;
+        }
+      } catch (error) {
+        captureError(error as Error);
+        setDialogState(null);
+        notify({
+          variant: "error",
+          size: "md",
+          title: translate("projectOpenFailed"),
+          description: translate("unexpectedErrorContactSupport"),
+          Icon: WarningIcon,
+        });
+        userTracking.capture({
+          name: "projectFile.openFailed",
+          source: "inpImport",
+          reason: "exception",
+        });
+        return;
+      }
+
+      const features: FeatureCollection = {
+        type: "FeatureCollection",
+        features: [...hydraulicModel.assets.values()].map((a) => a.feature),
+      };
+      const nextExtent = getExtent(features);
+      nextExtent.map((importedExtent) => {
+        map?.map.fitBounds(importedExtent as LngLatBoundsLike, {
+          padding: 100,
+          duration: 0,
+        });
+      });
+      setInpFileInfo({
+        name: file.name,
+        handle: isMadeByApp ? file.handle : undefined,
+        isMadeByApp,
+        isDemoNetwork: false,
+        options: { type: "inp" },
+      });
+      setProjectFileInfo(null);
+      setSavedProjectRevision(null);
+      if (file.handle) {
+        const handle = file.handle;
+        const name = file.name;
+        if (map) {
+          map.enqueueOnSettle(() => {
+            const thumbnail = captureThumbnail(map) ?? undefined;
+            void addRecent(name, handle, thumbnail);
+          });
+        } else {
+          void addRecent(name, handle);
+        }
+      }
+      handleImportComplete(issues);
+    },
+    [
+      addRecent,
+      startNewProject,
+      map,
+      setInpFileInfo,
+      setProjectFileInfo,
+      setSavedProjectRevision,
+      handleImportComplete,
+      setDialogState,
+      translate,
+      userTracking,
+    ],
+  );
+
+  const validateAndPrepare = useCallback(
+    (files: FileWithHandle[]) => {
+      const inps = files.filter((file) =>
+        file.name.toLowerCase().endsWith(inpExtension),
+      );
+
+      if (!inps.length) {
+        setDialogState({ type: "invalidFilesError" });
+        userTracking.capture({ name: "invalidFilesError.seen" });
+        return null;
+      }
+
+      if (inps.length > 1) {
+        notify({
+          variant: "warning",
+          size: "md",
+          title: translate("onlyOneInp"),
+          description: translate("onlyOneInpExplain"),
+          Icon: WarningIcon,
+        });
+      }
+
+      return inps[0];
+    },
+    [setDialogState, translate, userTracking],
+  );
+
+  const importInp = useCallback(
+    async (files: FileWithHandle[], source: string) => {
+      const file = validateAndPrepare(files);
+      if (!file) return;
+
+      setDialogState({ type: "loading" });
+
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const content = new TextDecoder().decode(arrayBuffer);
+        const parseOptions = {
+          customerPoints: true,
+          inactiveAssets: true,
+          populateAssetIndex: true,
+          labelMaxLength,
+          idPools: isIdPoolsOn,
+        };
+
+        const result = parseInp(content, parseOptions);
+        const {
+          hydraulicModel,
+          projectSettings,
+          issues,
+          stats,
+          projectionStatus,
+          suggestedXyScale,
+          isMadeByApp,
+        } = result;
+        userTracking.capture(
+          buildCompleteEvent(
+            source,
+            projectSettings,
+            issues,
+            stats,
+            isMadeByApp,
+          ),
+        );
+
+        if (
+          issues &&
+          (issues.malformedCoordinates || issues.malformedVertices)
+        ) {
+          setDialogState({ type: "inpMalformedCoordinates", issues });
+          return;
+        }
+
+        if (projectionStatus === "unknown") {
+          const previewGeoJson = parseCoordinatesGeoJson(content);
+
+          const onImportWithProjection = async (projection: Projection) => {
+            setDialogState({ type: "loading" });
+            try {
+              const mapper = createProjectionMapper(projection);
+              transformCoordinates(hydraulicModel, mapper.toWgs84);
+              result.projectSettings = {
+                ...result.projectSettings,
+                projection,
+              };
+              const autoElevations = projection.type !== "xy-grid";
+              await completeImport(file, result, {
+                autoElevations,
+              });
+            } catch (error) {
+              captureError(error as Error);
+              setDialogState({ type: "invalidFilesError" });
+            }
+          };
+
+          setDialogState({
+            type: "networkProjection",
+            source: "import",
+            previewGeoJson,
+            onImportWithProjection,
+            filename: file.name,
+            flowUnits: chooseUnitSystem(projectSettings.units),
+            suggestedXyScale,
+          });
+          return;
+        }
+
+        if (issues && issues.nodesMissingCoordinates) {
+          setDialogState({ type: "inpMissingCoordinates", issues });
+          return;
+        }
+
+        const autoElevations = projectSettings.projection.type !== "xy-grid";
+        await completeImport(file, result, { autoElevations });
+      } catch (error) {
+        handleError(error, {
+          as: "Import INP failed",
+          warn: [fileReadErrorName],
+          onUnexpected: "capture",
+          contexts: { "Import file": { name: file.name, size: file.size } },
+        });
+        setDialogState(
+          errorName(error) === fileReadErrorName
+            ? { type: "fileReadError", fileName: file.name }
+            : { type: "invalidFilesError" },
+        );
+      }
+    },
+    [
+      completeImport,
+      setDialogState,
+      userTracking,
+      validateAndPrepare,
+      labelMaxLength,
+      isIdPoolsOn,
+    ],
+  );
+
+  return importInp;
+};
+
+const buildCompleteEvent = (
+  source: string,
+  projectSettings: ProjectSettings,
+  issues: ParserIssues | null,
+  stats: InpStats,
+  isMadeByApp: boolean,
+): ImportInpCompleted => {
+  const issueKeys = issues ? Object.keys(issues) : [];
+
+  const processedIssues = issueKeys.flatMap((key) => {
+    if (key === "unsupportedSections" && issues?.unsupportedSections) {
+      return [...issues.unsupportedSections].map(
+        (sectionName) => `unsupportedSection-${sectionName}` as const,
+      );
+    }
+    if (key === "nonDefaultOptions" && issues?.nonDefaultOptions) {
+      return [...issues.nonDefaultOptions.keys()].map(
+        (optionName) => `nonDefaultOption-${optionName}` as const,
+      );
+    }
+    if (key === "nonDefaultTimes" && issues?.nonDefaultTimes) {
+      return [...issues.nonDefaultTimes.keys()].map(
+        (timeName) => `nonDefaultTime-${timeName}` as const,
+      );
+    }
+    return [key];
+  });
+
+  return {
+    name: "importInp.completed",
+    source,
+    counts: Object.fromEntries(stats.counts),
+    headlossFormula: projectSettings.headlossFormula,
+    units: chooseUnitSystem(projectSettings.units),
+    isMadeByApp,
+    issues: processedIssues,
+  } as ImportInpCompleted;
+};

@@ -1,0 +1,65 @@
+import { useMemo } from "react";
+import { useAtomValue } from "jotai";
+import { useAuth } from "src/hooks/use-auth";
+import { useOrganization } from "src/hooks/use-organization";
+import { useEffectivePlan } from "src/hooks/use-effective-plan";
+import { Plan, isTrialActive } from "src/lib/account-plans";
+import { isDemoNetworkAtom } from "src/state/file-system";
+
+export type Permissions = {
+  canAddCustomLayers: boolean;
+  canUseScenarios: boolean;
+  canUseElevations: boolean;
+  canRefreshElevations: boolean;
+  canUseZones: boolean;
+  canUseControls: boolean;
+  canUsePipeAttributes: boolean;
+  canUseModelBuildV2: boolean;
+  canValidateModelAttributes: boolean;
+  canUsePipeLibrary: boolean;
+  canUseCustomAttributes: boolean;
+  canImportSynergi: boolean;
+  canUpgrade: boolean;
+  canManageOrganization: boolean;
+};
+
+export const resolvePermissions = (
+  plan: Plan,
+  trialActive: boolean,
+  isOrgAdmin: boolean,
+  isDemoNetwork: boolean,
+): Permissions => {
+  const hasPaidAccess =
+    ["pro", "education", "personal", "teams"].includes(plan) || trialActive;
+  return {
+    canAddCustomLayers: hasPaidAccess,
+    canUseScenarios: hasPaidAccess,
+    canUseElevations: hasPaidAccess,
+    canRefreshElevations: hasPaidAccess,
+    canUseZones: hasPaidAccess || isDemoNetwork,
+    canUseControls: hasPaidAccess || isDemoNetwork,
+    canUsePipeAttributes: hasPaidAccess || isDemoNetwork,
+    canUseModelBuildV2: ["pro", "teams"].includes(plan) || trialActive,
+    canValidateModelAttributes: hasPaidAccess,
+    canUsePipeLibrary: hasPaidAccess || isDemoNetwork,
+    canUseCustomAttributes: hasPaidAccess || isDemoNetwork,
+    canImportSynergi: hasPaidAccess,
+    canUpgrade: plan === "free",
+    canManageOrganization: isOrgAdmin,
+  };
+};
+
+export const usePermissions = (): Permissions => {
+  const { user } = useAuth();
+  const effectivePlan = useEffectivePlan();
+  const trialActive = isTrialActive(user);
+  const org = useOrganization();
+  const membership = "membership" in org ? org.membership : null;
+  const isOrgAdmin = membership?.role === "org:admin";
+  const isDemoNetwork = useAtomValue(isDemoNetworkAtom);
+  return useMemo(
+    () =>
+      resolvePermissions(effectivePlan, trialActive, isOrgAdmin, isDemoNetwork),
+    [effectivePlan, trialActive, isOrgAdmin, isDemoNetwork],
+  );
+};

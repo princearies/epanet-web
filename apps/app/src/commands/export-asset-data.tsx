@@ -1,0 +1,105 @@
+import { useAtomCallback } from "jotai/utils";
+import { useCallback } from "react";
+import { Export, ExportFormat } from "src/lib/export";
+import { notifyPromiseState } from "src/components/notifications";
+import { useTranslate } from "src/hooks/use-translate";
+import {
+  stagingModelDerivedAtom,
+  simulationDerivedAtom,
+} from "src/state/derived-branch-state";
+import { simulationStepAtom } from "src/state/simulation";
+import { currentFileNameAtom } from "src/state/file-system";
+import type { ResultsReader } from "@epanet-js/simulation";
+import { projectSettingsAtom } from "src/state/project-settings";
+import { useUserTracking } from "src/infra/user-tracking";
+
+export type DataExportOptions = {
+  format: ExportFormat;
+  includeSimulationResults: boolean;
+  simulationStep?: number;
+  // null means "no filter, export all" (callers must be explicit).
+  assetIdFilter: Set<number> | null;
+  customerPointIdFilter: Set<number> | null;
+};
+
+export const useExportAssetData = () => {
+  const translate = useTranslate();
+  const { capture } = useUserTracking();
+
+  const exportNetwork = useAtomCallback(
+    useCallback(
+      async (get, _set, options: DataExportOptions) => {
+        const getResultsReader = async (): Promise<ResultsReader | null> => {
+          if (!options.includeSimulationResults) return null;
+
+          const simulation = get(simulationDerivedAtom);
+          const simulationStep =
+            options.simulationStep ?? get(simulationStepAtom);
+
+          if (
+            "epsResultsReader" in simulation &&
+            simulation.epsResultsReader &&
+            simulationStep !== null
+          ) {
+            const epsResultsReader = simulation.epsResultsReader;
+            return await epsResultsReader?.getResultsForTimestep(
+              simulationStep,
+            );
+          }
+
+          return null;
+        };
+
+        const hydraulicModel = get(stagingModelDerivedAtom);
+        const resultsReader = (await getResultsReader()) ?? undefined;
+        const networkName = get(currentFileNameAtom) ?? "";
+        const projectSettings = get(projectSettingsAtom);
+
+        const doExport = async () => {
+          const networkNameDot = networkName.lastIndexOf(".");
+          const networkNameWithoutExtension = networkName.substring(
+            0,
+            networkNameDot < 0 ? networkName.length - 1 : networkNameDot,
+          );
+          const fileName =
+            options.format === "xlsx"
+              ? `${networkNameWithoutExtension}-export`
+              : `${networkNameWithoutExtension}-export-${options.format}`;
+
+          await Export.exportAssetData(
+            fileName,
+            options.format,
+            hydraulicModel,
+            projectSettings.projection,
+            translate,
+            {
+              includeSimulationResults: options.includeSimulationResults,
+              assetIdsFilter: options.assetIdFilter,
+              customerPointIdFilter: options.customerPointIdFilter,
+              resultsReader,
+            },
+          );
+        };
+
+        try {
+          await notifyPromiseState(doExport(), {
+            loading: translate("exporting"),
+            success: translate("exported"),
+            error: translate("exportFailed"),
+          });
+          capture({
+            name: "assetData.exported",
+            format: options.format,
+            includeSimulationResults: options.includeSimulationResults,
+            hasSelection:
+              options.assetIdFilter !== null ||
+              options.customerPointIdFilter !== null,
+          });
+        } catch {}
+      },
+      [translate, capture],
+    ),
+  );
+
+  return exportNetwork;
+};

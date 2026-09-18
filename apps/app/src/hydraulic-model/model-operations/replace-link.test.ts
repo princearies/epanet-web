@@ -1,0 +1,1064 @@
+import { describe, it, expect } from "vitest";
+import { replaceLink } from "./replace-link";
+import {
+  HydraulicModelBuilder,
+  buildPipe,
+} from "src/__helpers__/hydraulic-model-builder";
+import {
+  Pipe,
+  Pump,
+  LinkAsset,
+  NodeAsset,
+  Valve,
+  CustomerPoint,
+} from "@epanet-js/hydraulic-model";
+import { Position } from "geojson";
+import { buildTestFactories } from "src/__helpers__/test-factories";
+
+describe("replaceLink", () => {
+  describe("basic functionality", () => {
+    it("replaces existing pipe with new pipe", () => {
+      const IDS = { J1: 1, J2: 2, P1: 3 } as const;
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aJunction(IDS.J1, { coordinates: [0, 0] })
+        .aJunction(IDS.J2, { coordinates: [10, 0] })
+        .aPipe(IDS.P1, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          coordinates: [
+            [0, 0],
+            [10, 0],
+          ],
+          diameter: 200,
+          isActive: true,
+        })
+        .build();
+
+      const newPipe = redrawn(hydraulicModel.assets.get(IDS.P1) as Pipe, [
+        [0, 0],
+        [5, 5],
+        [10, 0],
+      ]);
+
+      const startNode = hydraulicModel.assets.get(IDS.J1) as NodeAsset;
+      const endNode = hydraulicModel.assets.get(IDS.J2) as NodeAsset;
+
+      const { putAssets, deleteAssets } = replaceLink(hydraulicModel, {
+        assetFactory,
+        labelManager,
+        lengthUnit: "m",
+        sourceLinkId: IDS.P1,
+        newLink: newPipe,
+        startNode,
+        endNode,
+      });
+
+      expect(deleteAssets).toBeUndefined();
+      expect(putAssets).toBeDefined();
+
+      const addedPipe = putAssets!.find(
+        (asset) => asset.type === "pipe",
+      ) as Pipe;
+      expect(addedPipe).toBeDefined();
+      expect(addedPipe.id).toBe(IDS.P1);
+      expect(addedPipe.connections).toEqual([IDS.J1, IDS.J2]);
+      expect(addedPipe.isActive).toBe(true);
+    });
+
+    it("throws error for mismatched link types", () => {
+      const IDS = { J1: 1, J2: 2, P1: 3 } as const;
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aJunction(IDS.J1, { coordinates: [0, 0] })
+        .aJunction(IDS.J2, { coordinates: [10, 0] })
+        .aPipe(IDS.P1, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          coordinates: [
+            [0, 0],
+            [10, 0],
+          ],
+        })
+        .build();
+
+      const newPump = assetFactory.createPump({
+        label: "PU1",
+        coordinates: [
+          [0, 0],
+          [10, 0],
+        ],
+      });
+
+      const startNode = hydraulicModel.assets.get(IDS.J1) as NodeAsset;
+      const endNode = hydraulicModel.assets.get(IDS.J2) as NodeAsset;
+
+      expect(() =>
+        replaceLink(hydraulicModel, {
+          assetFactory,
+          labelManager,
+          lengthUnit: "m",
+          sourceLinkId: IDS.P1,
+          newLink: newPump,
+          startNode,
+          endNode,
+        }),
+      ).toThrow("Link types must match");
+    });
+
+    it("throws when splitting the link being replaced", () => {
+      const IDS = { J1: 1, J2: 2, P1: 3 } as const;
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aJunction(IDS.J1, { coordinates: [0, 0] })
+        .aJunction(IDS.J2, { coordinates: [10, 0] })
+        .aPipe(IDS.P1, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          coordinates: [
+            [0, 0],
+            [5, 0],
+            [10, 0],
+          ],
+        })
+        .build();
+
+      const newPipe = redrawn(hydraulicModel.assets.get(IDS.P1) as Pipe, [
+        [0, 0],
+        [10, 0],
+      ]);
+
+      const startNode = assetFactory.createJunction({
+        coordinates: [2, 0],
+      });
+      const endNode = assetFactory.createJunction({
+        coordinates: [8, 0],
+      });
+
+      expect(() =>
+        replaceLink(hydraulicModel, {
+          assetFactory,
+          labelManager,
+          lengthUnit: "m",
+          sourceLinkId: IDS.P1,
+          newLink: newPipe,
+          startNode,
+          endNode,
+          startPipeId: IDS.P1,
+          endPipeId: IDS.P1,
+        }),
+      ).toThrow(`Cannot split link ${IDS.P1} while replacing it`);
+    });
+  });
+
+  describe("auto-replace pipe section when redrawing", () => {
+    it("replaces middle pipe section when redrawing pipe onto same pipe", () => {
+      const IDS = { J1: 1, J2: 2, P1: 3, P2: 4, J3: 5, J4: 6 } as const;
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aJunction(IDS.J1, { coordinates: [0, 0] })
+        .aJunction(IDS.J2, { coordinates: [30, 0] })
+        .aPipe(IDS.P1, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          coordinates: [
+            [0, 0],
+            [30, 0],
+          ],
+          diameter: 100,
+          roughness: 0.5,
+        })
+        .aPipe(IDS.P2, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          coordinates: [
+            [0, 0],
+            [30, 0],
+          ],
+        })
+        .build();
+
+      const newPipe = buildPipe({
+        id: IDS.P2,
+        label: "P2",
+        coordinates: [
+          [10, 0],
+          [20, 0],
+        ],
+      });
+
+      const startNode = assetFactory.createJunction({
+        id: IDS.J3,
+        coordinates: [10, 0],
+      });
+      const endNode = assetFactory.createJunction({
+        id: IDS.J4,
+        coordinates: [20, 0],
+      });
+
+      const { putAssets, deleteAssets } = replaceLink(hydraulicModel, {
+        assetFactory,
+        labelManager,
+        lengthUnit: "m",
+        sourceLinkId: IDS.P2,
+        newLink: newPipe,
+        startNode,
+        endNode,
+        startPipeId: IDS.P1,
+        endPipeId: IDS.P1,
+      });
+
+      expect(deleteAssets).toContain(IDS.P1);
+      expect(deleteAssets).not.toContain(IDS.P2);
+
+      const pipes = putAssets!.filter((a) => a.type === "pipe") as Pipe[];
+      expect(pipes).toHaveLength(3);
+
+      const redrawnPipe = pipes.find((p) => p.id === IDS.P2);
+      expect(redrawnPipe).toBeDefined();
+    });
+
+    it("replaces section when redrawing pipe as valve onto same pipe", () => {
+      const IDS = { J1: 1, J2: 2, P1: 3, V1: 4, J3: 5, J4: 6 } as const;
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aJunction(IDS.J1, { coordinates: [0, 0] })
+        .aJunction(IDS.J2, { coordinates: [30, 0] })
+        .aPipe(IDS.P1, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          coordinates: [
+            [0, 0],
+            [30, 0],
+          ],
+          diameter: 150,
+        })
+        .aValve(IDS.V1, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          coordinates: [
+            [0, 0],
+            [30, 0],
+          ],
+        })
+        .build();
+
+      const newValve = assetFactory.createValve({
+        id: IDS.V1,
+        label: "V1",
+        coordinates: [
+          [10, 0],
+          [20, 0],
+        ],
+      });
+
+      const startNode = assetFactory.createJunction({
+        id: IDS.J3,
+        coordinates: [10, 0],
+      });
+      const endNode = assetFactory.createJunction({
+        id: IDS.J4,
+        coordinates: [20, 0],
+      });
+
+      const { putAssets, deleteAssets } = replaceLink(hydraulicModel, {
+        assetFactory,
+        labelManager,
+        lengthUnit: "m",
+        sourceLinkId: IDS.V1,
+        newLink: newValve,
+        startNode,
+        endNode,
+        startPipeId: IDS.P1,
+        endPipeId: IDS.P1,
+      });
+
+      expect(deleteAssets).toContain(IDS.P1);
+      expect(deleteAssets).not.toContain(IDS.V1);
+
+      const valve = putAssets!.find((a) => a.type === "valve") as Valve;
+      expect(valve).toBeDefined();
+      expect(valve.diameter).toBe(150);
+
+      const pipes = putAssets!.filter((a) => a.type === "pipe") as Pipe[];
+      expect(pipes).toHaveLength(2);
+    });
+  });
+
+  describe("active topology status inheritance", () => {
+    it("inherits isActive from source link when replacing active link", () => {
+      const IDS = { J1: 1, J2: 2, P1: 3 } as const;
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aJunction(IDS.J1, { coordinates: [0, 0] })
+        .aJunction(IDS.J2, { coordinates: [10, 0] })
+        .aPipe(IDS.P1, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          coordinates: [
+            [0, 0],
+            [10, 0],
+          ],
+          isActive: true,
+        })
+        .build();
+
+      const newPipe = redrawn(hydraulicModel.assets.get(IDS.P1) as Pipe, [
+        [0, 0],
+        [10, 0],
+      ]);
+
+      const startNode = hydraulicModel.assets.get(IDS.J1) as NodeAsset;
+      const endNode = hydraulicModel.assets.get(IDS.J2) as NodeAsset;
+
+      const { putAssets } = replaceLink(hydraulicModel, {
+        assetFactory,
+        labelManager,
+        lengthUnit: "m",
+        sourceLinkId: IDS.P1,
+        newLink: newPipe,
+        startNode,
+        endNode,
+      });
+
+      expect(putAssets).toHaveLength(3);
+      const assetsActiveTopologyState = Object.fromEntries(
+        putAssets!.map((asset) => [asset.id, asset.isActive]),
+      );
+      expect(assetsActiveTopologyState[IDS.P1]).toBe(true);
+      expect(assetsActiveTopologyState[IDS.J1]).toBe(true);
+      expect(assetsActiveTopologyState[IDS.J2]).toBe(true);
+    });
+
+    it("inherits isActive from source link when replacing inactive link", () => {
+      const IDS = { J1: 1, J2: 2, P0: 3, P1: 4 } as const;
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aJunction(IDS.J1, { coordinates: [0, 0], isActive: false })
+        .aJunction(IDS.J2, { coordinates: [10, 0], isActive: false })
+        .aPipe(IDS.P1, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          isActive: false,
+        })
+        .build();
+
+      const newPipe = redrawn(hydraulicModel.assets.get(IDS.P1) as Pipe, [
+        [0, 0],
+        [10, 0],
+      ]);
+
+      const startNode = hydraulicModel.assets.get(IDS.J1) as NodeAsset;
+      const endNode = hydraulicModel.assets.get(IDS.J2) as NodeAsset;
+
+      const { putAssets } = replaceLink(hydraulicModel, {
+        assetFactory,
+        labelManager,
+        lengthUnit: "m",
+        sourceLinkId: IDS.P1,
+        newLink: newPipe,
+        startNode,
+        endNode,
+      });
+
+      expect(putAssets).toHaveLength(3);
+      const assetsActiveTopologyState = Object.fromEntries(
+        putAssets!.map((asset) => [asset.id, asset.isActive]),
+      );
+      expect(assetsActiveTopologyState[IDS.P1]).toBe(false);
+      expect(assetsActiveTopologyState[IDS.J1]).toBe(false);
+      expect(assetsActiveTopologyState[IDS.J2]).toBe(false);
+    });
+
+    it("re-activates old nodes when removing only non-active link", () => {
+      const IDS = { J1: 1, J2: 2, P1: 3, J3: 4, J4: 5 } as const;
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aJunction(IDS.J1, { coordinates: [0, 0], isActive: false })
+        .aJunction(IDS.J2, { coordinates: [10, 0], isActive: false })
+        .aPipe(IDS.P1, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          isActive: false,
+        })
+        .build();
+
+      const newPipe = redrawn(hydraulicModel.assets.get(IDS.P1) as Pipe, [
+        [2, 0],
+        [8, 0],
+      ]);
+      const newStartNode = assetFactory.createJunction({
+        id: IDS.J3,
+        coordinates: [2, 0],
+      });
+      const newEndNode = assetFactory.createJunction({
+        id: IDS.J4,
+        coordinates: [8, 0],
+      });
+
+      const { putAssets } = replaceLink(hydraulicModel, {
+        assetFactory,
+        labelManager,
+        lengthUnit: "m",
+        sourceLinkId: IDS.P1,
+        newLink: newPipe,
+        startNode: newStartNode,
+        endNode: newEndNode,
+      });
+
+      expect(putAssets).toHaveLength(5);
+      const assetsActiveTopologyState = Object.fromEntries(
+        putAssets!.map((asset) => [asset.id, asset.isActive]),
+      );
+      expect(assetsActiveTopologyState[IDS.J1]).toBe(true);
+      expect(assetsActiveTopologyState[IDS.J2]).toBe(true);
+      expect(assetsActiveTopologyState[IDS.J3]).toBe(false);
+      expect(assetsActiveTopologyState[IDS.J4]).toBe(false);
+    });
+
+    it("deactivates previous nodes when removing only active link", () => {
+      const IDS = { J1: 1, J2: 2, J3: 3, J4: 4, P0: 5, P1: 6 } as const;
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aJunction(IDS.J1, { coordinates: [0, 0], isActive: true })
+        .aJunction(IDS.J2, { coordinates: [10, 0], isActive: true })
+        .aPipe(IDS.P0, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          isActive: false,
+        })
+        .aPipe(IDS.P1, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          isActive: true,
+        })
+        .build();
+
+      const newPipe = redrawn(hydraulicModel.assets.get(IDS.P1) as Pipe, [
+        [0, 0],
+        [10, 0],
+      ]);
+
+      const newStartNode = assetFactory.createJunction({
+        id: IDS.J3,
+        coordinates: [2, 0],
+      });
+
+      const newEndNode = assetFactory.createJunction({
+        id: IDS.J4,
+        coordinates: [8, 0],
+      });
+
+      const { putAssets } = replaceLink(hydraulicModel, {
+        assetFactory,
+        labelManager,
+        lengthUnit: "m",
+        sourceLinkId: IDS.P1,
+        newLink: newPipe,
+        startNode: newStartNode,
+        endNode: newEndNode,
+      });
+
+      expect(putAssets).toHaveLength(5);
+      const assetsActiveTopologyState = Object.fromEntries(
+        putAssets!.map((asset) => [asset.id, asset.isActive]),
+      );
+      expect(assetsActiveTopologyState[IDS.J1]).toBe(false);
+      expect(assetsActiveTopologyState[IDS.J2]).toBe(false);
+    });
+
+    it("sets correct active state for nodes when redrawing inactive pipe splitting inactive and active pipes", () => {
+      const IDS = {
+        J1: 1,
+        J2: 2,
+        J3: 3,
+        J4: 4,
+        P1: 5,
+        P2: 6,
+        P3: 7,
+        N1: 8,
+        N2: 9,
+      } as const;
+
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aJunction(IDS.J1, { coordinates: [0, 0], isActive: false })
+        .aJunction(IDS.J2, { coordinates: [10, 0], isActive: false })
+        .aPipe(IDS.P1, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          coordinates: [
+            [0, 0],
+            [10, 0],
+          ],
+          isActive: false,
+        })
+        .aJunction(IDS.J3, { coordinates: [0, 10], isActive: false })
+        .aJunction(IDS.J4, { coordinates: [10, 10], isActive: false })
+        .aPipe(IDS.P2, {
+          startNodeId: IDS.J3,
+          endNodeId: IDS.J4,
+          coordinates: [
+            [0, 10],
+            [10, 10],
+          ],
+          isActive: false,
+        })
+        .aJunction(IDS.J3 + 10, { coordinates: [0, 20], isActive: true })
+        .aJunction(IDS.J4 + 10, { coordinates: [10, 20], isActive: true })
+        .aPipe(IDS.P3, {
+          startNodeId: IDS.J3 + 10,
+          endNodeId: IDS.J4 + 10,
+          coordinates: [
+            [0, 20],
+            [10, 20],
+          ],
+          isActive: true,
+        })
+        .build();
+
+      const newPipe = redrawn(hydraulicModel.assets.get(IDS.P1) as Pipe, [
+        [5, 10], // Will split P2
+        [5, 20], // Will split P3
+      ]);
+
+      const startNode = assetFactory.createJunction({
+        id: IDS.N1,
+        label: "N1",
+        coordinates: [5, 10],
+      });
+
+      const endNode = assetFactory.createJunction({
+        id: IDS.N2,
+        label: "N2",
+        coordinates: [5, 20],
+      });
+
+      const { putAssets } = replaceLink(hydraulicModel, {
+        assetFactory,
+        labelManager,
+        lengthUnit: "m",
+        sourceLinkId: IDS.P1,
+        newLink: newPipe,
+        startNode,
+        endNode,
+        startPipeId: IDS.P2,
+        endPipeId: IDS.P3,
+      });
+
+      expect(putAssets).toBeDefined();
+
+      const assetsActiveTopologyState = Object.fromEntries(
+        putAssets!.map((asset) => [asset.id, asset.isActive]),
+      );
+
+      expect(assetsActiveTopologyState[IDS.P1]).toBe(false);
+      expect(assetsActiveTopologyState[IDS.N1]).toBe(false);
+      expect(assetsActiveTopologyState[IDS.N2]).toBe(true);
+    });
+  });
+
+  describe("customer points reconnection", () => {
+    it("reconnects customer points to closest junction", () => {
+      const IDS = { J1: 1, J2: 2, P1: 3, CP1: 4 } as const;
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aJunction(IDS.J1, { coordinates: [0, 0] })
+        .aJunction(IDS.J2, { coordinates: [10, 0] })
+        .aPipe(IDS.P1, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          coordinates: [
+            [0, 0],
+            [10, 0],
+          ],
+        })
+        .aCustomerPoint(IDS.CP1, {
+          coordinates: [2, 1],
+          connection: {
+            pipeId: IDS.P1,
+            snapPoint: [2, 0],
+            junctionId: IDS.J1,
+          },
+        })
+        .build();
+
+      const newPipe = redrawn(hydraulicModel.assets.get(IDS.P1) as Pipe, [
+        [0, 0],
+        [10, 0],
+      ]);
+
+      const startNode = hydraulicModel.assets.get(IDS.J1) as NodeAsset;
+      const endNode = hydraulicModel.assets.get(IDS.J2) as NodeAsset;
+
+      const { putCustomerPoints, putAssets } = replaceLink(hydraulicModel, {
+        assetFactory,
+        labelManager,
+        lengthUnit: "m",
+        sourceLinkId: IDS.P1,
+        newLink: newPipe,
+        startNode,
+        endNode,
+      });
+
+      expect(putCustomerPoints).toBeDefined();
+      expect(putCustomerPoints!.length).toBe(1);
+
+      const reconnectedCP = putCustomerPoints![0];
+      expect(reconnectedCP.id).toBe(IDS.CP1);
+      expect(reconnectedCP.connection).not.toBeNull();
+      expect(reconnectedCP.connection!.junctionId).toBe(IDS.J1);
+
+      const newPipeId = putAssets!.find((asset) => asset.type === "pipe")!.id;
+      expect(reconnectedCP.connection!.pipeId).toBe(newPipeId);
+
+      expect(reconnectedCP.connection!.snapPoint).toEqual([2, 0]);
+    });
+
+    it("recalculates snap point when new pipe has different geometry", () => {
+      const IDS = { J1: 1, J2: 2, P1: 3, CP1: 4 } as const;
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aJunction(IDS.J1, { coordinates: [0, 0] })
+        .aJunction(IDS.J2, { coordinates: [10, 0] })
+        .aPipe(IDS.P1, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          coordinates: [
+            [0, 0],
+            [10, 0],
+          ],
+        })
+        .aCustomerPoint(IDS.CP1, {
+          coordinates: [3, 2],
+          connection: {
+            pipeId: IDS.P1,
+            snapPoint: [3, 0],
+            junctionId: IDS.J1,
+          },
+        })
+        .build();
+
+      const newPipe = redrawn(hydraulicModel.assets.get(IDS.P1) as Pipe, [
+        [0, 0],
+        [5, 5],
+        [10, 0],
+      ]);
+
+      const startNode = hydraulicModel.assets.get(IDS.J1) as NodeAsset;
+      const endNode = hydraulicModel.assets.get(IDS.J2) as NodeAsset;
+
+      const { putCustomerPoints } = replaceLink(hydraulicModel, {
+        assetFactory,
+        labelManager,
+        lengthUnit: "m",
+        sourceLinkId: IDS.P1,
+        newLink: newPipe,
+        startNode,
+        endNode,
+      });
+
+      expect(putCustomerPoints).toBeDefined();
+      const reconnectedCP = putCustomerPoints![0];
+
+      expect(reconnectedCP.connection!.snapPoint).not.toEqual([3, 0]);
+
+      const snapPoint = reconnectedCP.connection!.snapPoint;
+      expect(snapPoint[0]).toBeCloseTo(2.5, 1);
+      expect(snapPoint[1]).toBeCloseTo(2.5, 1);
+    });
+
+    it("reconnects to farther junction when closer is not junction", () => {
+      const IDS = { T1: 1, J2: 2, P1: 3, CP1: 4 } as const;
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aTank(IDS.T1, { coordinates: [0, 0] })
+        .aJunction(IDS.J2, { coordinates: [10, 0] })
+        .aPipe(IDS.P1, {
+          startNodeId: IDS.T1,
+          endNodeId: IDS.J2,
+          coordinates: [
+            [0, 0],
+            [10, 0],
+          ],
+        })
+        .aCustomerPoint(IDS.CP1, {
+          coordinates: [2, 1],
+          connection: {
+            pipeId: IDS.P1,
+            snapPoint: [2, 0],
+            junctionId: IDS.J2,
+          },
+        })
+        .build();
+
+      const newPipe = redrawn(hydraulicModel.assets.get(IDS.P1) as Pipe, [
+        [0, 0],
+        [10, 0],
+      ]);
+
+      const startNode = hydraulicModel.assets.get(IDS.T1) as NodeAsset;
+      const endNode = hydraulicModel.assets.get(IDS.J2) as NodeAsset;
+
+      const { putCustomerPoints } = replaceLink(hydraulicModel, {
+        assetFactory,
+        labelManager,
+        lengthUnit: "m",
+        sourceLinkId: IDS.P1,
+        newLink: newPipe,
+        startNode,
+        endNode,
+      });
+
+      expect(putCustomerPoints).toBeDefined();
+      const reconnectedCP = putCustomerPoints![0];
+      expect(reconnectedCP.connection!.junctionId).toBe(IDS.J2);
+    });
+
+    it("disconnects customer points when no junctions available", () => {
+      const IDS = { T1: 1, R1: 2, P1: 3, CP1: 4 } as const;
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aTank(IDS.T1, { coordinates: [0, 0] })
+        .aReservoir(IDS.R1, { coordinates: [10, 0] })
+        .aPipe(IDS.P1, {
+          startNodeId: IDS.T1,
+          endNodeId: IDS.R1,
+          coordinates: [
+            [0, 0],
+            [10, 0],
+          ],
+        })
+        .build();
+
+      const customerPoint = new CustomerPoint(IDS.CP1, [5, 1], {
+        label: "CP1",
+      });
+      customerPoint.connect({
+        pipeId: IDS.P1,
+        snapPoint: [5, 0],
+        junctionId: IDS.T1,
+      });
+      hydraulicModel.customerPoints.set(IDS.CP1, customerPoint);
+      hydraulicModel.customerPointsLookup.addConnection(customerPoint);
+
+      const newPipe = redrawn(hydraulicModel.assets.get(IDS.P1) as Pipe, [
+        [0, 0],
+        [10, 0],
+      ]);
+
+      const startNode = hydraulicModel.assets.get(IDS.T1) as NodeAsset;
+      const endNode = hydraulicModel.assets.get(IDS.R1) as NodeAsset;
+
+      const { putCustomerPoints } = replaceLink(hydraulicModel, {
+        assetFactory,
+        labelManager,
+        lengthUnit: "m",
+        sourceLinkId: IDS.P1,
+        newLink: newPipe,
+        startNode,
+        endNode,
+      });
+
+      expect(putCustomerPoints).toBeDefined();
+      const disconnectedCP = putCustomerPoints![0];
+      expect(disconnectedCP.connection).toBeNull();
+    });
+
+    it("handles non-pipe links without customer point processing", () => {
+      const IDS = { J1: 1, J2: 2, PU1: 3 } as const;
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aJunction(IDS.J1, { coordinates: [0, 0] })
+        .aJunction(IDS.J2, { coordinates: [10, 0] })
+        .aPump(IDS.PU1, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          coordinates: [
+            [0, 0],
+            [10, 0],
+          ],
+        })
+        .build();
+
+      const newPump = redrawn(hydraulicModel.assets.get(IDS.PU1) as Pump, [
+        [0, 0],
+        [5, 0],
+        [10, 0],
+      ]);
+
+      const startNode = hydraulicModel.assets.get(IDS.J1) as NodeAsset;
+      const endNode = hydraulicModel.assets.get(IDS.J2) as NodeAsset;
+
+      const { putAssets, deleteAssets, putCustomerPoints } = replaceLink(
+        hydraulicModel,
+        {
+          assetFactory,
+          labelManager,
+          lengthUnit: "m",
+          sourceLinkId: IDS.PU1,
+          newLink: newPump,
+          startNode,
+          endNode,
+        },
+      );
+
+      expect(deleteAssets).toBeUndefined();
+      expect(putAssets).toBeDefined();
+      expect(putCustomerPoints).toBeUndefined();
+    });
+  });
+
+  describe("pump attribute preservation when redrawing", () => {
+    it("preserves the pump curve and other attributes", () => {
+      const IDS = { J1: 1, J2: 2, PU1: 3 } as const;
+      const customCurve = [
+        { x: 0, y: 100 },
+        { x: 50, y: 80 },
+        { x: 100, y: 40 },
+      ];
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aJunction(IDS.J1, { coordinates: [0, 0] })
+        .aJunction(IDS.J2, { coordinates: [10, 0] })
+        .aPump(IDS.PU1, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          coordinates: [
+            [0, 0],
+            [10, 0],
+          ],
+          definitionType: "designPointCurve",
+          curve: customCurve,
+          speed: 2,
+          initialStatus: "off",
+        })
+        .build();
+
+      const sourcePump = hydraulicModel.assets.get(IDS.PU1) as Pump;
+
+      // The redraw flow rebuilds the link from a copy of the source pump with
+      // new geometry (see draw-link-handlers `startDrawing`).
+      const redrawnPump = sourcePump.copy();
+      redrawnPump.setCoordinates([
+        [0, 0],
+        [5, 5],
+        [10, 0],
+      ]);
+
+      const startNode = hydraulicModel.assets.get(IDS.J1) as NodeAsset;
+      const endNode = hydraulicModel.assets.get(IDS.J2) as NodeAsset;
+
+      const { putAssets } = replaceLink(hydraulicModel, {
+        assetFactory,
+        labelManager,
+        lengthUnit: "m",
+        sourceLinkId: IDS.PU1,
+        newLink: redrawnPump,
+        startNode,
+        endNode,
+      });
+
+      const updatedPump = putAssets!.find(
+        (asset) => asset.type === "pump",
+      ) as Pump;
+      expect(updatedPump).toBeDefined();
+      expect(updatedPump.curve).toEqual(customCurve);
+      expect(updatedPump.definitionType).toEqual("designPointCurve");
+      expect(updatedPump.speed).toEqual(2);
+      expect(updatedPump.initialStatus).toEqual("off");
+      expect(updatedPump.coordinates).toEqual([
+        [0, 0],
+        [5, 5],
+        [10, 0],
+      ]);
+    });
+
+    it("preserves valve attributes", () => {
+      const IDS = { J1: 1, J2: 2, V1: 3 } as const;
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aJunction(IDS.J1, { coordinates: [0, 0] })
+        .aJunction(IDS.J2, { coordinates: [10, 0] })
+        .aValve(IDS.V1, {
+          startNodeId: IDS.J1,
+          endNodeId: IDS.J2,
+          coordinates: [
+            [0, 0],
+            [10, 0],
+          ],
+          kind: "fcv",
+          setting: 42,
+          diameter: 250,
+          minorLoss: 3,
+          initialStatus: "closed",
+        })
+        .build();
+
+      const sourceValve = hydraulicModel.assets.get(IDS.V1) as Valve;
+
+      const redrawnValve = sourceValve.copy();
+      redrawnValve.setCoordinates([
+        [0, 0],
+        [5, 5],
+        [10, 0],
+      ]);
+
+      const startNode = hydraulicModel.assets.get(IDS.J1) as NodeAsset;
+      const endNode = hydraulicModel.assets.get(IDS.J2) as NodeAsset;
+
+      const { putAssets } = replaceLink(hydraulicModel, {
+        assetFactory,
+        labelManager,
+        lengthUnit: "m",
+        sourceLinkId: IDS.V1,
+        newLink: redrawnValve,
+        startNode,
+        endNode,
+      });
+
+      const updatedValve = putAssets!.find(
+        (asset) => asset.type === "valve",
+      ) as Valve;
+      expect(updatedValve).toBeDefined();
+      expect(updatedValve.kind).toEqual("fcv");
+      expect(updatedValve.setting).toEqual(42);
+      expect(updatedValve.diameter).toEqual(250);
+      expect(updatedValve.minorLoss).toEqual(3);
+      expect(updatedValve.initialStatus).toEqual("closed");
+      expect(updatedValve.coordinates).toEqual([
+        [0, 0],
+        [5, 5],
+        [10, 0],
+      ]);
+    });
+  });
+
+  describe("error cases", () => {
+    it("throws error when source link not found", () => {
+      const IDS = { NONEXISTENT: 999 } as const;
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      }).build();
+
+      const newPipe = assetFactory.createPipe({
+        label: "P2",
+        coordinates: [
+          [0, 0],
+          [10, 0],
+        ],
+      });
+
+      const startNode = assetFactory.createJunction({
+        coordinates: [0, 0],
+      });
+      const endNode = assetFactory.createJunction({
+        coordinates: [10, 0],
+      });
+
+      expect(() =>
+        replaceLink(hydraulicModel, {
+          assetFactory,
+          labelManager,
+          lengthUnit: "m",
+          sourceLinkId: IDS.NONEXISTENT,
+          newLink: newPipe,
+          startNode,
+          endNode,
+        }),
+      ).toThrow(`Source link with id ${IDS.NONEXISTENT} not found`);
+    });
+
+    it("throws when the new link does not keep the source id", () => {
+      const IDS = { J1: 1, J2: 2, P1: 3, P2: 4 } as const;
+      const { assetFactory, labelManager } = buildTestFactories();
+      const hydraulicModel = HydraulicModelBuilder.with({
+        assetFactory,
+        labelManager,
+      })
+        .aJunction(IDS.J1, { coordinates: [0, 0] })
+        .aJunction(IDS.J2, { coordinates: [10, 0] })
+        .aPipe(IDS.P1, { startNodeId: IDS.J1, endNodeId: IDS.J2 })
+        .build();
+
+      const newPipe = buildPipe({
+        id: IDS.P2,
+        coordinates: [
+          [0, 0],
+          [10, 0],
+        ],
+      });
+
+      expect(() =>
+        replaceLink(hydraulicModel, {
+          assetFactory,
+          labelManager,
+          lengthUnit: "m",
+          sourceLinkId: IDS.P1,
+          newLink: newPipe,
+          startNode: hydraulicModel.assets.get(IDS.J1) as NodeAsset,
+          endNode: hydraulicModel.assets.get(IDS.J2) as NodeAsset,
+        }),
+      ).toThrow("Replaced link must keep the source id");
+    });
+  });
+});
+
+const redrawn = <T extends LinkAsset>(link: T, coordinates: Position[]): T => {
+  const copy = link.copy() as T;
+  copy.setCoordinates(coordinates);
+  return copy;
+};

@@ -1,0 +1,473 @@
+import { memo, useMemo, useCallback, useRef, useEffect } from "react";
+import ReactECharts, { EChartsInstance } from "echarts-for-react";
+import type { EChartsOption } from "echarts";
+import { useTranslate } from "src/hooks/use-translate";
+import { localizeDecimal } from "@epanet-js/i18n";
+import { colors } from "src/lib/constants";
+
+interface QuickGraphChartProps {
+  values: number[];
+  baseValues: number[] | null;
+  baseLabel: string | null;
+  intervalsCount: number;
+  intervalSeconds: number;
+  decimals: number;
+  currentIntervalIndex: number;
+  onIntevalClick: (intervalIndex: number) => void;
+  scenarioName: string | null;
+  valueLabels?: Map<number, string> | null;
+}
+
+export const QuickGraphChart = memo(function QuickGraphChart(
+  props: QuickGraphChartProps,
+) {
+  return <QuickGraphChartECharts {...props} />;
+});
+
+function QuickGraphChartECharts({
+  values,
+  baseValues,
+  baseLabel,
+  intervalsCount,
+  intervalSeconds,
+  currentIntervalIndex,
+  decimals,
+  onIntevalClick,
+  scenarioName,
+  valueLabels = null,
+}: QuickGraphChartProps) {
+  const translate = useTranslate();
+
+  const formatValue = useCallback(
+    (value: number) =>
+      valueLabels
+        ? (valueLabels.get(value) ?? "")
+        : localizeDecimal(value, { decimals }),
+    [valueLabels, decimals],
+  );
+
+  const showLegend = baseValues && baseValues.length > 0;
+
+  const allValues = useMemo(() => {
+    if (!baseValues || baseValues.length === 0) return values;
+    return [...values, ...baseValues];
+  }, [values, baseValues]);
+
+  const xAxis: EChartsOption["xAxis"] = useMemo(
+    () => buildXAxis(intervalsCount, intervalSeconds),
+    [intervalsCount, intervalSeconds],
+  );
+  const yAxis: EChartsOption["yAxis"] = useMemo(
+    () =>
+      valueLabels
+        ? buildDiscreteYAxis(valueLabels)
+        : buildYAxis(allValues, decimals),
+    [valueLabels, allValues, decimals],
+  );
+
+  const series: EChartsOption["series"] = useMemo(() => {
+    const scenarioSeries = {
+      type: "line" as const,
+      name: scenarioName ?? undefined,
+      data: values,
+      lineStyle: {
+        color: colors.purple500,
+        width: 2,
+      },
+      itemStyle: {
+        color: colors.purple500,
+      },
+      symbol: "none",
+      smooth: false,
+      triggerLineEvent: true,
+      markLine: {
+        silent: true,
+        symbol: "none",
+        data: [] as { xAxis: number }[],
+        lineStyle: {
+          type: "solid" as const,
+          color: colors.purple300,
+          width: 1.5,
+        },
+        label: { show: false },
+      },
+    };
+
+    if (!baseValues || baseValues.length === 0) {
+      return [scenarioSeries];
+    }
+
+    const baseSeries = {
+      type: "line" as const,
+      name: baseLabel ?? undefined,
+      data: baseValues,
+      lineStyle: {
+        color: colors.gray400,
+        width: 1.5,
+      },
+      itemStyle: {
+        color: colors.gray400,
+      },
+      symbol: "none",
+      smooth: false,
+      z: 0,
+    };
+
+    return [baseSeries, scenarioSeries];
+  }, [scenarioName, values, baseValues, baseLabel]);
+
+  const scenarioSeriesIndex = baseValues && baseValues.length > 0 ? 1 : 0;
+
+  const legend: EChartsOption["legend"] = useMemo(() => {
+    if (!showLegend) return undefined;
+    return {
+      show: true,
+      top: 0,
+      right: 0,
+      itemWidth: 16,
+      itemHeight: 8,
+      textStyle: {
+        fontSize: 12,
+        color: colors.gray600,
+      },
+    };
+  }, [showLegend]);
+
+  const isComparingScenarios = baseValues !== null;
+  const option: EChartsOption = useMemo(
+    () => ({
+      animation: false,
+      grid: {
+        top: showLegend ? 20 : 8,
+        right: 8,
+        bottom: 4,
+        left: 36,
+        containLabel: false,
+      },
+      legend,
+      xAxis,
+      yAxis,
+      series,
+      tooltip: {
+        trigger: "axis",
+        appendToBody: true,
+        backgroundColor: "white",
+        borderColor: colors.gray300,
+        textStyle: {
+          color: colors.gray700,
+          fontSize: 14,
+        },
+        formatter: (params: any) => {
+          if (!Array.isArray(params) || params.length === 0) return "";
+          const timeLabel = params[0]?.name ?? "";
+          const lines = params.map((p: any) => {
+            const value = formatValue(p.value);
+            if (!isComparingScenarios) return value;
+            const colorDot = `<span style="display:inline-block;width:8px;height:8px;background:${p.color};margin-right:4px;border-radius:50%;"></span>`;
+            return `${colorDot}${p.seriesName ?? ""}: ${value}`;
+          });
+          return `${timeLabel}<br/>${lines.join("<br/>")}`;
+        },
+      },
+    }),
+    [
+      showLegend,
+      legend,
+      xAxis,
+      yAxis,
+      series,
+      formatValue,
+      isComparingScenarios,
+    ],
+  );
+
+  const chartRef = useRef<ReactECharts>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(function resizeChart() {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const resizeObserver = new ResizeObserver(() => {
+      const chart = chartRef.current?.getEchartsInstance();
+      chart?.resize();
+    });
+
+    resizeObserver.observe(container);
+    return () => resizeObserver.disconnect();
+  }, []);
+
+  const applyMarkLine = useCallback(
+    (chart: EChartsInstance) => {
+      const seriesUpdate: any[] = [];
+      for (let i = 0; i < scenarioSeriesIndex; i++) seriesUpdate.push({});
+      seriesUpdate.push({
+        markLine: {
+          silent: true,
+          symbol: "none",
+          label: { show: false },
+          data: [{ xAxis: currentIntervalIndex }],
+        },
+      });
+      chart.setOption({ series: seriesUpdate });
+    },
+    [currentIntervalIndex, scenarioSeriesIndex],
+  );
+
+  useEffect(
+    function updateMarkLinePosition() {
+      const chart = chartRef.current?.getEchartsInstance();
+      if (!chart) return;
+      applyMarkLine(chart);
+    },
+    [applyMarkLine],
+  );
+
+  const onChartReady = useCallback(
+    (chart: EChartsInstance) => {
+      applyMarkLine(chart);
+
+      const zr = chart.getZr();
+
+      zr.on("click", (params: any) => {
+        const pointInPixel = [params.offsetX, params.offsetY];
+        if (!chart.containPixel("grid", pointInPixel)) return;
+
+        const pointInGrid = chart.convertFromPixel("grid", pointInPixel);
+        const dataIndex = Math.round(pointInGrid[0]);
+        if (dataIndex >= 0 && dataIndex < values.length) {
+          onIntevalClick(dataIndex);
+        }
+      });
+
+      zr.on("mousemove", (params: any) => {
+        const pointInPixel = [params.offsetX, params.offsetY];
+        const isInGrid = chart.containPixel("grid", pointInPixel);
+        zr.setCursorStyle(isInGrid ? "pointer" : "default");
+      });
+    },
+    [onIntevalClick, values.length, applyMarkLine],
+  );
+
+  if (intervalsCount === 0 || values.length === 0) {
+    return (
+      <div className="h-full flex items-center justify-center text-subtle text-size-small">
+        {translate("noDataAvailable")}
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} className="h-full w-full">
+      <ReactECharts
+        ref={chartRef}
+        key={`${intervalSeconds}-${intervalsCount}`}
+        option={option}
+        style={{ height: "100%", width: "100%" }}
+        opts={{ renderer: "svg" }}
+        onChartReady={onChartReady}
+      />
+    </div>
+  );
+}
+
+const buildXAxis = (
+  intervalsCount: number,
+  intervalSeconds: number,
+): EChartsOption["xAxis"] => {
+  const xAxisInterval = calculateXAxisInterval(intervalsCount, intervalSeconds);
+  const xAxisStep = calculateXAxisStep(intervalsCount, intervalSeconds);
+  return {
+    type: "category",
+    data: buildTimeLabels(intervalsCount, intervalSeconds),
+    show: true,
+    boundaryGap: false,
+    splitLine: {
+      show: true,
+      lineStyle: { color: colors.gray300, type: "dashed" },
+      interval: (index: number) => {
+        if (index === intervalsCount - 1) return false;
+        return index % xAxisStep === 0;
+      },
+    },
+    axisTick: {
+      show: true,
+      alignWithLabel: true,
+      lineStyle: { color: colors.gray300 },
+      interval: (index: number) => index % xAxisStep === 0,
+    },
+    axisLabel: {
+      show: true,
+      interval: xAxisInterval,
+      color: colors.gray500,
+      fontSize: 12,
+      hideOverlap: true,
+    },
+    axisLine: { show: true, lineStyle: { color: colors.gray300 } },
+  };
+};
+
+const buildTimeLabels = (intervalsCount: number, intervalSeconds: number) => {
+  const labels: string[] = [];
+  for (let i = 0; i < intervalsCount; i++) {
+    const totalSeconds = i * intervalSeconds;
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    labels.push(`${hours}:${minutes.toString().padStart(2, "0")}`);
+  }
+  return labels;
+};
+
+const calculateXAxisInterval = (
+  intervalCount: number,
+  intervalSeconds: number,
+  targetTickCount = 5,
+) => {
+  const totalSeconds = intervalCount * intervalSeconds;
+
+  const logicalSteps = [3600, 7200, 10800, 14400, 21600, 28800, 43200, 86400];
+
+  const idealStep = totalSeconds / (targetTickCount - 1 || 1);
+
+  const bestStepSeconds = logicalSteps.reduce((prev, curr) => {
+    return Math.abs(curr - idealStep) < Math.abs(prev - idealStep)
+      ? curr
+      : prev;
+  });
+
+  const indexInterval = Math.round(bestStepSeconds / intervalSeconds);
+
+  return (index: number) => {
+    return index % indexInterval === 0;
+  };
+};
+
+const calculateXAxisStep = (
+  intervalCount: number,
+  intervalSeconds: number,
+  targetTickCount = 5,
+): number => {
+  const totalSeconds = intervalCount * intervalSeconds;
+  const rawStep = totalSeconds / Math.max(targetTickCount - 1, 1);
+
+  const step = [3600, 7200, 10800, 14400, 21600, 28800, 43200, 86400].reduce(
+    (prev, curr) => {
+      return Math.abs(curr - rawStep) < Math.abs(prev - rawStep) ? curr : prev;
+    },
+  );
+
+  return Math.max(1, Math.round(step / intervalSeconds));
+};
+
+const buildDiscreteYAxis = (
+  valueLabels: Map<number, string>,
+): EChartsOption["yAxis"] => {
+  const steps = [...valueLabels.keys()].sort((a, b) => a - b);
+  return {
+    type: "value",
+    min: steps[0],
+    max: steps[steps.length - 1],
+    interval: 1,
+    splitLine: {
+      show: true,
+      lineStyle: { color: colors.gray300, type: "dashed" },
+    },
+    axisLine: { show: true, lineStyle: { color: colors.gray300 } },
+    axisTick: { show: true, lineStyle: { color: colors.gray300 } },
+    axisLabel: {
+      color: colors.gray500,
+      fontSize: 12,
+      formatter: (value: number) => valueLabels.get(value) ?? "",
+    },
+  };
+};
+
+const buildYAxis = (
+  values: number[],
+  decimals: number,
+): EChartsOption["yAxis"] => {
+  const { min, max, interval } = calculateInterval(decimals, values, 5);
+  return {
+    type: "value",
+    scale: true,
+    min,
+    max,
+    interval,
+    splitLine: {
+      show: true,
+      lineStyle: { color: colors.gray300, type: "dashed" },
+    },
+    axisLine: { show: true, lineStyle: { color: colors.gray300 } },
+    axisTick: { show: true, lineStyle: { color: colors.gray300 } },
+    axisLabel: {
+      color: colors.gray500,
+      fontSize: 12,
+      formatter: (value: number) => {
+        return localizeDecimal(value, { decimals });
+      },
+    },
+  };
+};
+
+const MAX_Y_AXIS_ZOOM = 0.1;
+
+export const calculateInterval = (
+  decimals: number,
+  values: number[],
+  targetIntervalsCount = 5,
+): { min: number; max: number; interval: number } => {
+  if (values.length === 0) return { min: 0, max: 0, interval: 0 };
+
+  const factor = Math.pow(10, decimals);
+  const minVal =
+    values.length > 0 ? Math.floor(Math.min(...values) * factor) / factor : 0;
+  const maxVal =
+    values.length > 0 ? Math.ceil(Math.max(...values) * factor) / factor : 0;
+  const range = maxVal - minVal;
+
+  const minPrecision = Math.max(Math.pow(10, -decimals + 1), MAX_Y_AXIS_ZOOM);
+  let niceInterval = minPrecision;
+  if (range > 0) {
+    const roughInterval = range / (targetIntervalsCount - 1);
+    const magnitude = Math.pow(10, Math.floor(Math.log10(roughInterval)));
+    const normalizedInterval = roughInterval / magnitude;
+
+    const niceFactor = [1, 2, 2.5, 5, 10].reduce((prev, curr) => {
+      return Math.abs(curr - normalizedInterval) <
+        Math.abs(prev - normalizedInterval)
+        ? curr
+        : prev;
+    });
+
+    niceInterval = Math.max(
+      Math.round(niceFactor * magnitude * factor) / factor,
+      minPrecision,
+    );
+  }
+  if (niceInterval > minPrecision) {
+    const min = Math.floor(minVal / niceInterval) * niceInterval;
+    const max = Math.ceil(maxVal / niceInterval) * niceInterval;
+    return { min, max, interval: niceInterval };
+  }
+
+  const offset =
+    (targetIntervalsCount - 1) * minPrecision - Math.abs(maxVal - minVal);
+  const halfOffset = offset / 2;
+
+  let min: number;
+  let max: number;
+  if (minVal >= 0 && minVal < halfOffset) {
+    const maxOffset = offset - minVal;
+    min = 0;
+    max = Math.floor((maxVal + maxOffset) / minPrecision) * minPrecision;
+  } else {
+    min = Math.ceil((minVal - halfOffset) / minPrecision) * minPrecision;
+    max = Math.floor((maxVal + halfOffset) / minPrecision) * minPrecision;
+  }
+
+  // Ensure computed range contains all data points
+  while (min > minVal) min -= minPrecision;
+  while (max < maxVal) max += minPrecision;
+
+  return { min, max, interval: minPrecision };
+};

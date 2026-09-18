@@ -1,0 +1,552 @@
+import { useNewProject } from "src/commands/create-new-project";
+import { useOpenDemoNetwork } from "src/commands/open-demo-network";
+import { useOpenModelBuilder } from "src/commands/open-model-builder";
+import { useOpenProject } from "src/commands/open-project";
+import { useOpenRecentFile } from "src/commands/open-recent-file";
+import { useTranslate } from "src/hooks/use-translate";
+import { useRecentFiles } from "src/hooks/use-recent-files";
+import { useUserTracking } from "src/infra/user-tracking";
+import { languageConfig } from "@epanet-js/i18n/locale";
+import { useLocale, LocaleProvider } from "src/hooks/use-locale";
+import {
+  helpCenterUrl,
+  landingPageUrl,
+  privacyPolicyUrl,
+  quickStartTutorialUrl,
+  termsAndConditionsUrl,
+} from "src/global-config";
+import {
+  Button,
+  Loading,
+  LogoIconAndWordmarkIcon,
+} from "../components/elements";
+import {
+  ArrowRightIcon,
+  CloseIcon,
+  FileIcon,
+  FileSpreadsheetIcon,
+  FolderOpenIcon,
+  GlobeIcon,
+  HelpIcon,
+  EarlyAccessIcon,
+} from "src/icons";
+import { BaseDialog, DialogCloseX, useDialogState } from "../components/dialog";
+import { Callout } from "@epanet-js/ui-kit";
+import { DRUMCHAPEL, WATERDOWN } from "src/demo/demo-networks";
+import optimaticsLogoUrl from "src/assets/images/logos/optimatics-logo-black.webp";
+import affinityWaterLogoUrl from "src/assets/images/logos/affinity-water-logo.svg";
+import anglianWaterLogoUrl from "src/assets/images/logos/anglian-water-logo.webp";
+import atkinsRealisLogoUrl from "src/assets/images/logos/atkins-realis-logo.svg";
+import iteratingLogoUrl from "src/assets/images/logos/iterating-logo-muted-padded.svg";
+import type { RecentFileEntry } from "src/lib/recent-files";
+import Image from "next/image";
+
+export const WelcomeDialog = () => {
+  const translate = useTranslate();
+  const createNew = useNewProject();
+  const openProject = useOpenProject();
+  const openModelBuilder = useOpenModelBuilder();
+  const userTracking = useUserTracking();
+
+  const currentLocale = useLocale();
+  const currentLanguage = languageConfig.find(
+    (lang) => lang.code === currentLocale.locale,
+  );
+  const isExperimental = currentLanguage?.experimental ?? false;
+
+  const { closeDialog } = useDialogState();
+
+  return (
+    <BaseDialog size="lg" isOpen={true} onClose={closeDialog}>
+      <LocaleProvider>
+        <div className="relative grid sm:grid-cols-[min-content_1fr]">
+          <div className="absolute top-6 right-6 z-10">
+            <DialogCloseX />
+          </div>
+          <div className="bg-panel sm:border-r border-b sm:border-b-0 rounded-t-lg sm:rounded-t-none sm:rounded-tl-lg sm:rounded-bl-lg col-span-1 md:w-max flex flex-col p-6 gap-6">
+            <div className="pl-1">
+              <LogoIconAndWordmarkIcon size={147} />
+            </div>
+            <div className="sm:hidden">
+              <SmallDeviceWarning />
+            </div>
+            <div className="h-full flex flex-col gap-2">
+              <Button
+                variant="quiet"
+                onClick={() => {
+                  void createNew({ source: "welcome" });
+                }}
+                className="hidden sm:flex"
+                style={{ width: "100%" }}
+              >
+                <FileIcon />
+                {translate("startBlankProject")}
+              </Button>
+              <Button
+                variant="quiet"
+                onClick={() => {
+                  openProject({ source: "welcome" });
+                }}
+                style={{ width: "100%" }}
+              >
+                <FolderOpenIcon />
+                {translate("openModel")}
+              </Button>
+              <Button
+                variant="quiet"
+                onClick={() => {
+                  openModelBuilder({ source: "welcome" });
+                }}
+                style={{ width: "100%" }}
+                className="mt-4"
+              >
+                <GlobeIcon />
+                {translate("importFromGIS")}
+                <EarlyAccessIcon size="sm" />
+              </Button>
+
+              <div className="mt-4 flex items-start flex-col gap-2">
+                <a
+                  href={helpCenterUrl}
+                  target="_blank"
+                  onClick={() => {
+                    userTracking.capture({
+                      name: "helpCenter.visited",
+                      source: "welcome",
+                    });
+                  }}
+                  style={{ width: "100%" }}
+                >
+                  <Button variant="quiet" style={{ width: "100%" }}>
+                    <HelpIcon />
+                    {translate("helpCenter")}
+                  </Button>
+                </a>
+                <a
+                  href={quickStartTutorialUrl}
+                  target="_blank"
+                  onClick={() => {
+                    userTracking.capture({
+                      name: "quickStart.visited",
+                      source: "welcome",
+                    });
+                  }}
+                  style={{ width: "100%" }}
+                >
+                  <Button variant="primary" style={{ width: "100%" }}>
+                    <ArrowRightIcon />
+                    {translate("quickStartTutorial")}
+                  </Button>
+                </a>
+              </div>
+
+              <div className="flex flex-col gap-2 mt-auto text-size-small">
+                <a href={termsAndConditionsUrl} target="_blank">
+                  {translate("termsAndConditions")}
+                </a>
+                <a href={privacyPolicyUrl} target="_blank">
+                  {translate("privacyPolicy")}
+                </a>
+              </div>
+              <div className="flex items-center mt-2 text-size-small text-subtle">
+                By
+                <a href="https://iterating.ca" target="_blank">
+                  <img src={iteratingLogoUrl.src} className="h-8" />
+                </a>
+              </div>
+            </div>
+          </div>
+          <div className="p-6 min-w-0 flex flex-col overflow-hidden">
+            {isExperimental && (
+              <div className="mt-7 mb-3">
+                <Callout
+                  variant="info"
+                  title={translate("startNotificationLanguageTitle")}
+                  className="border rounded-lg"
+                >
+                  {translate("startNotificationLanguageDescription")}
+                </Callout>
+              </div>
+            )}
+
+            <RecentNetworks />
+
+            <FoundingPartners />
+          </div>
+        </div>
+        <div className="hidden sm:max-md:block mb-2">
+          <SmallDeviceWarning />
+        </div>
+      </LocaleProvider>
+    </BaseDialog>
+  );
+};
+
+const FoundingPartners = () => {
+  const translate = useTranslate();
+  const userTracking = useUserTracking();
+  return (
+    <div className="bg-panel rounded-lg p-4 mt-6 text-size-small text-center shrink-0">
+      <h3 className="pb-2 text-subtle font-bold">
+        {translate("foundersPartnerTitle")}
+      </h3>
+      <div className="flex gap-4 place-content-between">
+        <a
+          className=""
+          href="https://optimatics.com/"
+          target="_blank"
+          onClick={() => {
+            userTracking.capture({
+              name: "foundersPartner.visited",
+              link: "optimatics",
+            });
+          }}
+        >
+          <img
+            src={optimaticsLogoUrl.src}
+            className="block h-7.5 mt-3.75"
+            height="30"
+          />
+        </a>
+        <a
+          href="https://www.affinitywater.co.uk/"
+          target="_blank"
+          className="pt-4"
+          onClick={() => {
+            userTracking.capture({
+              name: "foundersPartner.visited",
+              link: "affinityWater",
+            });
+          }}
+        >
+          <img
+            src={affinityWaterLogoUrl.src}
+            className="block h-3.5"
+            height="14"
+          />
+        </a>
+        <a
+          href="https://www.atkinsrealis.com/"
+          target="_blank"
+          className="pt-3"
+          onClick={() => {
+            userTracking.capture({
+              name: "foundersPartner.visited",
+              link: "atkinsRealis",
+            });
+          }}
+        >
+          <img
+            src={atkinsRealisLogoUrl.src}
+            className="block h-3.5"
+            height="14"
+          />
+        </a>
+        <a
+          href="https://www.anglianwater.co.uk/"
+          target="_blank"
+          className="pt-3 -mt-5.75"
+          onClick={() => {
+            userTracking.capture({
+              name: "foundersPartner.visited",
+              link: "anglianWater",
+            });
+          }}
+        >
+          <img
+            src={anglianWaterLogoUrl.src}
+            className="block h-10"
+            height="40"
+          />
+        </a>
+      </div>
+      <p className="text-subtle">
+        {translate("foundersPartnerDescription")}{" "}
+        <a
+          href="https://help.epanetjs.com/Founding-Partner-program-2f6e18c9f0f680d8be27c05c0b5844bb"
+          target="_blank"
+          className="underline text-violet-500"
+          onClick={() => {
+            userTracking.capture({
+              name: "foundersPartner.visited",
+              link: "foundersPartners",
+            });
+          }}
+        >
+          {translate("foundersPartnerLearnMore")}
+        </a>
+        .
+      </p>
+    </div>
+  );
+};
+
+const SmallDeviceWarning = () => {
+  const translate = useTranslate();
+  return (
+    <Callout
+      variant="warning"
+      title={translate("headsUpSmallScreen")}
+      className="border rounded-lg"
+    >
+      <p>{translate("smallScreenExplain")}</p>
+      <hr className="my-4" />
+      <p className="pb-2">{translate("hereYourOptions")}:</p>
+      <div className="ml-2 space-y-2">
+        <ul>
+          <strong>{translate("continueAnyway")}</strong>:{" "}
+          {translate("continueAnywayExplain")}
+        </ul>
+        <ul>
+          <a className="underline" href={quickStartTutorialUrl}>
+            <strong>{translate("watchQuickDemo")}</strong>
+          </a>
+          : {translate("watchQuickDemoExplain")}
+        </ul>
+        <ul>
+          <a className="underline" href={landingPageUrl}>
+            <strong>{translate("visitLandingPage")}</strong>
+          </a>
+          : {translate("visitLandingPageExplain")}
+        </ul>
+      </div>
+    </Callout>
+  );
+};
+
+const DemoNetworks = () => {
+  const translate = useTranslate();
+
+  const demoModels = [
+    {
+      name: DRUMCHAPEL.name,
+      description: translate("demoUKStyleDescription"),
+      url: DRUMCHAPEL.url,
+      thumbnailUrl: DRUMCHAPEL.thumbnailUrl,
+    },
+    {
+      name: WATERDOWN.name,
+      description: translate("demoUSStyleDescription"),
+      url: WATERDOWN.url,
+      thumbnailUrl: WATERDOWN.thumbnailUrl,
+    },
+  ];
+
+  return (
+    <div>
+      <h2 className="pt-2 pb-2 font-bold text-subtle">
+        {translate("demoNetworksTitle")}
+      </h2>
+
+      <div className="grid grid-cols-2 gap-6 h-[270px]">
+        {demoModels.map((demoModel, i) => (
+          <DemoNetworkCard key={i} demoNetwork={demoModel} />
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const RecentNetworks = () => {
+  const translate = useTranslate();
+  const {
+    recentFiles,
+    isLoading: isRecentFilesLoading,
+    removeRecent,
+    isSupported: isRecentFilesSupported,
+  } = useRecentFiles();
+  const openRecentFile = useOpenRecentFile();
+  const hasRecentFiles = recentFiles.length > 0;
+
+  const demoModels = [
+    {
+      name: DRUMCHAPEL.name,
+      description: translate("demoUKStyleDescription"),
+      url: DRUMCHAPEL.url,
+      thumbnailUrl: DRUMCHAPEL.thumbnailUrl,
+    },
+    {
+      name: WATERDOWN.name,
+      description: translate("demoUSStyleDescription"),
+      url: WATERDOWN.url,
+      thumbnailUrl: WATERDOWN.thumbnailUrl,
+    },
+  ];
+
+  if (!isRecentFilesSupported) return <DemoNetworks />;
+
+  if (!isRecentFilesLoading && !hasRecentFiles) return <DemoNetworks />;
+
+  if (isRecentFilesLoading)
+    return (
+      <div className="flex h-[310px]">
+        <Loading />
+      </div>
+    );
+
+  return (
+    <>
+      <h2 className="pt-2 pb-2 font-bold text-subtle">
+        {translate("recentNetworks")}
+      </h2>
+      <div className="overflow-y-auto min-h-0 scroll-shadows h-[270px]">
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+          {recentFiles.map((entry) => (
+            <RecentFileCard
+              key={entry.id}
+              entry={entry}
+              onOpen={() => openRecentFile(entry, "welcome")}
+              onRemove={() => void removeRecent(entry.id)}
+            />
+          ))}
+          {demoModels.map((demo, i) => (
+            <DemoAsRecentCard key={`demo-${i}`} demoNetwork={demo} />
+          ))}
+        </div>
+      </div>
+    </>
+  );
+};
+
+const RecentFileCard = ({
+  entry,
+  onOpen,
+  onRemove,
+}: {
+  entry: RecentFileEntry;
+  onOpen: () => void;
+  onRemove: () => void;
+}) => (
+  <div
+    className="group flex flex-col rounded-lg border shadow-xs cursor-pointer hover:bg-panel overflow-hidden min-w-0"
+    onClick={onOpen}
+  >
+    <div className="relative bg-panel shrink-0" style={{ aspectRatio: "5/4" }}>
+      <Button
+        variant="default"
+        size="xxs"
+        className="absolute top-1 right-1 z-10 opacity-0 group-hover:opacity-100 transition-opacity"
+        onClick={(e) => {
+          e.stopPropagation();
+          onRemove();
+        }}
+        aria-label="Remove"
+      >
+        <CloseIcon />
+      </Button>
+      {entry.thumbnail ? (
+        <img
+          src={entry.thumbnail}
+          alt={entry.name}
+          className="w-full h-full object-cover"
+        />
+      ) : (
+        <div className="w-full h-full flex items-center justify-center">
+          <FileSpreadsheetIcon className="text-disabled" />
+        </div>
+      )}
+    </div>
+    <div className="p-2 flex flex-col gap-0.5 overflow-hidden">
+      <span
+        className="text-size-small font-medium text-default truncate"
+        title={entry.name}
+      >
+        {entry.name}
+      </span>
+      <span className="text-size-small text-subtle">
+        {`${new Date(entry.openedAt).toLocaleDateString()} ${new Date(entry.openedAt).toLocaleTimeString()}`}
+      </span>
+    </div>
+  </div>
+);
+
+type DemoModel = {
+  name: string;
+  description: string;
+  url: string;
+  thumbnailUrl: string;
+};
+
+const DemoAsRecentCard = ({ demoNetwork }: { demoNetwork: DemoModel }) => {
+  const translate = useTranslate();
+  const userTracking = useUserTracking();
+  const { openDemoNetwork } = useOpenDemoNetwork();
+
+  const handleClick = () => {
+    userTracking.capture({
+      name: "exampleModel.clicked",
+      modelName: demoNetwork.name,
+    });
+    void openDemoNetwork(demoNetwork.url);
+  };
+
+  return (
+    <div
+      className="flex flex-col rounded-lg border shadow-xs cursor-pointer hover:bg-panel overflow-hidden min-w-0"
+      onClick={handleClick}
+    >
+      <div
+        className="relative bg-panel shrink-0 overflow-hidden"
+        style={{ aspectRatio: "5/4" }}
+      >
+        <img
+          src={demoNetwork.thumbnailUrl}
+          alt={demoNetwork.name}
+          className="w-full h-full object-cover"
+        />
+      </div>
+      <div className="p-2 flex flex-col gap-0.5 overflow-hidden">
+        <div className="flex items-center gap-1">
+          <span
+            className="text-size-small font-medium text-default truncate"
+            title={demoNetwork.name}
+          >
+            {demoNetwork.name}
+          </span>
+          <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase bg-warning-subtle text-warning rounded-full shrink-0 leading-none">
+            {translate("demoShort")}
+          </span>
+        </div>
+        <span className="text-size-small text-subtle line-clamp-2">
+          {demoNetwork.description}
+        </span>
+      </div>
+    </div>
+  );
+};
+
+const DemoNetworkCard = ({ demoNetwork }: { demoNetwork: DemoModel }) => {
+  const userTracking = useUserTracking();
+  const { openDemoNetwork } = useOpenDemoNetwork();
+
+  const handleOpenDemoModel = () => {
+    userTracking.capture({
+      name: "exampleModel.clicked",
+      modelName: demoNetwork.name,
+    });
+    void openDemoNetwork(demoNetwork.url);
+  };
+  return (
+    <div
+      className="flex flex-col max-w-[250px] items-center gap-x-2 bg-base shadow-md rounded-lg border cursor-pointer hover:bg-gray-400/10"
+      onClick={handleOpenDemoModel}
+    >
+      <div className="shrink-0">
+        <Image
+          src={demoNetwork.thumbnailUrl}
+          alt={demoNetwork.name}
+          width={247}
+          height={200}
+          quality={90}
+          className="rounded-tl-md rounded-tr-md object-cover"
+        />
+      </div>
+      <div className="flex flex-col p-3">
+        <span className="text-subtle font-bold text-size-base">
+          {demoNetwork.name}
+        </span>
+        <span className="text-size-small">{demoNetwork.description}</span>
+      </div>
+    </div>
+  );
+};

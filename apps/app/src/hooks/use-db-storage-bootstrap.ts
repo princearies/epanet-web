@@ -1,0 +1,79 @@
+import { useEffect, useRef, useState } from "react";
+import { useSetAtom } from "jotai";
+import { dbPoolExists } from "@epanet-js/ejsdb";
+import { useSeedDefaultProjectDb } from "src/hooks/persistence/use-start-new-project";
+import { useUserTracking } from "src/infra/user-tracking";
+import { captureError } from "src/infra/error-tracking";
+import { configureDbStorage } from "src/lib/db";
+import {
+  dbStorageModeAtom,
+  recoverableSessionsAtom,
+} from "src/state/session-recovery";
+import {
+  readRecoveryFingerprints,
+  clearRecoveryFingerprints,
+  type RecoveryFingerprint,
+} from "src/infra/session-recovery";
+import { isSessionAlive } from "src/infra/session-lock";
+
+export const useDbStorageBootstrap = (isEnabled: boolean): boolean => {
+  const [isDbReady, setIsDbReady] = useState(false);
+  const seedDefaultProjectDb = useSeedDefaultProjectDb();
+  const setDbStorageMode = useSetAtom(dbStorageModeAtom);
+  const setRecoverableSessions = useSetAtom(recoverableSessionsAtom);
+  const userTracking = useUserTracking();
+  const dbInitializedRef = useRef(false);
+
+  useEffect(() => {
+    if (dbInitializedRef.current) return;
+    if (!isEnabled) return;
+    dbInitializedRef.current = true;
+
+    const bootstrap = async () => {
+      try {
+        const effective = await configureDbStorage();
+        const recoveryActive = effective === "sahpool";
+        setDbStorageMode(recoveryActive ? "opfs" : "memory");
+
+        if (recoveryActive) {
+          const recoverable: RecoveryFingerprint[] = [];
+          const stalePoolIds: string[] = [];
+          for (const fingerprint of readRecoveryFingerprints()) {
+            if (await isSessionAlive(fingerprint.poolId)) continue;
+            if (await dbPoolExists(fingerprint.poolId)) {
+              recoverable.push(fingerprint);
+            } else {
+              stalePoolIds.push(fingerprint.poolId);
+            }
+          }
+
+          clearRecoveryFingerprints(stalePoolIds);
+
+          if (recoverable.length > 0) {
+            setRecoverableSessions(recoverable);
+            userTracking.capture({
+              name: "sessionRecovery.offered",
+              count: recoverable.length,
+            });
+          }
+        }
+      } catch (error) {
+        captureError(error as Error);
+      }
+
+      await seedDefaultProjectDb();
+    };
+
+    void bootstrap().finally(() => {
+      setIsDbReady(true);
+    });
+  }, [
+    isEnabled,
+    seedDefaultProjectDb,
+    setDbStorageMode,
+    setRecoverableSessions,
+    userTracking,
+  ]);
+
+  return isDbReady;
+};

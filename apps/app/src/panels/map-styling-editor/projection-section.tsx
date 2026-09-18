@@ -1,0 +1,151 @@
+import { useContext } from "react";
+import { useAtom, useAtomValue, useSetAtom } from "jotai";
+import { isPlayingAtom } from "src/state/simulation-playback";
+import type { FeatureCollection } from "geojson";
+import type { LngLatBoundsLike } from "mapbox-gl";
+import { projectSettingsAtom } from "src/state/project-settings";
+import { stagingModelDerivedAtom } from "src/state/derived-branch-state";
+import { dialogAtom } from "src/state/dialog";
+import { Button } from "src/components/elements";
+import { CollapsibleSection } from "src/components/form/fields";
+import { mapStylingPanelSectionsExpandedAtom } from "src/state/layout";
+import { MapPinnedIcon } from "src/icons";
+import type { Projection } from "@epanet-js/projections";
+import {
+  inverseProjectGeoJson,
+  createProjectionMapper,
+} from "@epanet-js/projections";
+import { transformCoordinates } from "src/hydraulic-model/mutations/transform-coordinates";
+import { chooseUnitSystem } from "src/simulation/build-inp";
+import { useFeatureFlag } from "src/hooks/use-feature-flags";
+import { useReprojectionReset } from "src/hooks/persistence/use-reprojection-reset";
+import { MapContext } from "src/map";
+import { captureError } from "src/infra/error-tracking";
+import { hasScenariosAtom } from "src/state/scenarios";
+import { useTranslate } from "src/hooks/use-translate";
+
+export const ProjectionSection = () => {
+  const projectSettings = useAtomValue(projectSettingsAtom);
+  const { projection } = projectSettings;
+  const hydraulicModel = useAtomValue(stagingModelDerivedAtom);
+  const setDialogState = useSetAtom(dialogAtom);
+  const map = useContext(MapContext);
+  const { reprojectionReset } = useReprojectionReset();
+  const hasScenarios = useAtomValue(hasScenariosAtom);
+  const isPlaying = useAtomValue(isPlayingAtom);
+  const isXYGrid = projection.type === "xy-grid";
+  const isReprojectWgs84On = useFeatureFlag("FLAG_REPROJECT_WGS84");
+  const t = useTranslate();
+
+  const handleOpenProjectionDialog = () => {
+    const geoJson: FeatureCollection = {
+      type: "FeatureCollection",
+      features: [...hydraulicModel.assets.values()].map((a) => a.feature),
+    };
+
+    const previewGeoJson = inverseProjectGeoJson(geoJson, projection);
+
+    setDialogState({
+      type: "networkProjection",
+      source: "map-panel",
+      previewGeoJson,
+      onImportWithProjection: async (newProjection: Projection, extent) => {
+        setDialogState({ type: "loading" });
+        try {
+          const currentMapper = createProjectionMapper(projection);
+          const newMapper = createProjectionMapper(newProjection);
+          transformCoordinates(hydraulicModel, (p) => {
+            const source = currentMapper.toSource(p);
+            return newMapper.toWgs84(source);
+          });
+          await reprojectionReset({
+            hydraulicModel: { ...hydraulicModel },
+            projectSettings: {
+              ...projectSettings,
+              projection: newProjection,
+            },
+            autoElevations: newProjection.type !== "xy-grid",
+          });
+          if (extent) {
+            map?.map.once("idle", () => {
+              map.map.fitBounds(extent as LngLatBoundsLike, {
+                padding: 100,
+                duration: 0,
+              });
+            });
+          }
+          setDialogState(null);
+        } catch (error) {
+          captureError(error as Error);
+          setDialogState(null);
+        }
+      },
+      filename: "",
+      flowUnits: chooseUnitSystem(projectSettings.units),
+      initialProjection:
+        projection.type === "proj4"
+          ? projection
+          : projection.type === "wgs84" && isReprojectWgs84On
+            ? {
+                type: "proj4",
+                id: "EPSG:4326",
+                name: "WGS 84",
+                code: "EPSG:4326",
+              }
+            : undefined,
+    });
+  };
+
+  const projectionName =
+    projection.type === "wgs84" ? "WGS 84" : projection.name;
+  const projectionCode =
+    projection.type === "wgs84" ? "EPSG:4326" : projection.id;
+
+  const [sections, setSections] = useAtom(mapStylingPanelSectionsExpandedAtom);
+
+  const isReadonly = hasScenarios || isPlaying;
+  return (
+    <CollapsibleSection
+      title={t("projection")}
+      open={sections.projection}
+      onOpenChange={(open) =>
+        setSections((prev) => ({ ...prev, projection: open }))
+      }
+      separator={false}
+      variant="primary"
+    >
+      {isXYGrid ? (
+        !isReadonly && (
+          <Button
+            variant="default"
+            size="sm"
+            className="w-full justify-center"
+            onClick={handleOpenProjectionDialog}
+          >
+            <MapPinnedIcon />
+            {t("networkProjection.setMapProjection")}
+          </Button>
+        )
+      ) : (
+        <div className="flex items-start gap-2 -mr-1">
+          <div className="flex flex-col min-w-0 flex-1 text-size-base">
+            <div className="truncate">{projectionName}</div>
+            <div className="text-subtle truncate">{projectionCode}</div>
+          </div>
+          {(projection.type === "proj4" ||
+            (projection.type === "wgs84" && isReprojectWgs84On)) &&
+            !isReadonly && (
+              <Button
+                variant="quiet/mode"
+                className="h-8 shrink-0"
+                onClick={handleOpenProjectionDialog}
+                aria-label="Change projection"
+              >
+                <MapPinnedIcon />
+              </Button>
+            )}
+        </div>
+      )}
+    </CollapsibleSection>
+  );
+};

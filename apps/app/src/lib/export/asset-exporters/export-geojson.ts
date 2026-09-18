@@ -1,0 +1,381 @@
+import { TranslateFn } from "@epanet-js/i18n";
+import {
+  Asset,
+  AssetType,
+  HydraulicModel,
+  Projection,
+} from "src/hydraulic-model";
+import { AssetExportOptions, ExportedAssetTypes, ExportedFile } from "../types";
+import { ResultsReader } from "src/simulation";
+import { Feature, Position } from "geojson";
+import { FILE_NAMES } from "./constants";
+import { NUM_DECIMAL_PLACES, COORDINATE_DECIMAL_PLACES } from "../constants";
+import { createProjectionMapper } from "@epanet-js/projections";
+import {
+  buildExportDefaults,
+  resolveExportProperties,
+  type ExportDefaults,
+} from "./optional-field-defaults";
+import { isExportableField } from "./excluded-fields";
+import {
+  buildPropertyNameResolver,
+  PropertyNameResolver,
+} from "./property-names";
+
+const GEOJSON_END = `]}`;
+
+const epsgCodeOf = (id: string): string | null =>
+  /^EPSG:(\d+)$/i.exec(id)?.[1] ?? null;
+
+const namedCrs = (name: string): string =>
+  `{"type":"name","properties":{"name":${JSON.stringify(name)}}}`;
+
+const buildCrs = (projection: Projection): string | null => {
+  switch (projection.type) {
+    case "wgs84":
+      return namedCrs("urn:ogc:def:crs:EPSG::4326");
+    case "proj4": {
+      const code = epsgCodeOf(projection.id);
+      return code === null ? null : namedCrs(`urn:ogc:def:crs:EPSG::${code}`);
+    }
+    case "xy-grid":
+      return namedCrs(projection.id);
+  }
+};
+
+const buildGeoJsonHeader = (crs: string | null): string =>
+  crs === null
+    ? `{"type":"FeatureCollection","features":[`
+    : `{"type":"FeatureCollection","crs":${crs},"features":[`;
+
+export const exportGeoJson = (
+  hydraulicModel: HydraulicModel,
+  projection: Projection,
+  translate: TranslateFn,
+  options?: AssetExportOptions,
+): ExportedFile[] => {
+  const includeSimulationResults =
+    (options?.includeSimulationResults ?? false) && !!options?.resultsReader;
+  const selectedAssets = options?.assetIdsFilter ?? null;
+  const selectedCustomerPoints = options?.customerPointIdFilter ?? null;
+  const resultsReader = options?.resultsReader;
+  const defaults = buildExportDefaults(hydraulicModel);
+  const resolvePropertyName = buildPropertyNameResolver(
+    hydraulicModel.customAttributes,
+    translate,
+  );
+  const entrySize = estimateEntrySize(hydraulicModel, resolvePropertyName);
+  const size =
+    Math.max(hydraulicModel.assets.size, hydraulicModel.customerPoints.size) *
+      2 *
+      entrySize +
+    1024;
+  const encoder = new TextEncoder();
+  const crs = buildCrs(projection);
+  const transformCoord =
+    crs === null
+      ? (position: Position) => position
+      : createProjectionMapper(projection).toSource;
+  const getSimulationResults = buildSimulationResultsReader(resultsReader);
+  const { buffers, offsets } = allocateBuffers(size);
+  const header = buildGeoJsonHeader(crs);
+
+  encodeHeader(buffers, offsets, encoder, header);
+
+  hydraulicModel.assets.forEach((asset) => {
+    if (selectedAssets && !selectedAssets.has(asset.id)) return;
+
+    const simulationValues = includeSimulationResults
+      ? getSimulationResults[asset.type](asset)
+      : {};
+    const buffer = buffers[asset.type];
+    const offset = offsets[asset.type];
+    const view = buffer.subarray(offset);
+    const geoJson = assetToGeoJson(
+      hydraulicModel,
+      asset,
+      resolvePropertyName,
+      simulationValues,
+      transformCoord,
+      defaults,
+    );
+
+    const textContent = `${geoJson},`;
+    const { written } = encoder.encodeInto(textContent, view);
+    offsets[asset.type] += written;
+  });
+
+  hydraulicModel.customerPoints.forEach((point) => {
+    if (selectedCustomerPoints && !selectedCustomerPoints.has(point.id)) return;
+    const junctionConnection =
+      point.connection !== null
+        ? (hydraulicModel.assets.get(point.connection.junctionId)?.label ?? "")
+        : "";
+    const pipeConnection =
+      point.connection !== null
+        ? (hydraulicModel.assets.get(point.connection.pipeId)?.label ?? "")
+        : "";
+    const [x, y] = transformCoord(point.coordinates);
+    const snapPoint = point.connection?.snapPoint;
+    const [cx, cy] = snapPoint
+      ? transformCoord(snapPoint)
+      : [undefined, undefined];
+    const mapped = {
+      type: "Feature",
+      geometry: {
+        type: "Point",
+        coordinates: [
+          Number(x.toFixed(COORDINATE_DECIMAL_PLACES)),
+          Number(y.toFixed(COORDINATE_DECIMAL_PLACES)),
+        ],
+      },
+      properties: localizePropertyKeys(
+        {
+          label: point.label,
+          junctionConnection,
+          pipeConnection,
+          connectionX:
+            cx !== undefined
+              ? Number(cx.toFixed(COORDINATE_DECIMAL_PLACES))
+              : undefined,
+          connectionY:
+            cy !== undefined
+              ? Number(cy.toFixed(COORDINATE_DECIMAL_PLACES))
+              : undefined,
+        },
+        "customerPoint",
+        resolvePropertyName,
+      ),
+    };
+
+    const buffer = buffers["customerPoint"];
+    const offset = offsets["customerPoint"];
+    const view = buffer.subarray(offset);
+
+    const { written } = encoder.encodeInto(`${JSON.stringify(mapped)},`, view);
+    offsets["customerPoint"] += written;
+  });
+
+  removeTrailingComma(buffers, offsets, header.length);
+  encodeEnd(buffers, offsets, encoder);
+
+  const headerByteLength = encoder.encode(header).length;
+  const endByteLength = encoder.encode(GEOJSON_END).length;
+  const emptyFileLength = headerByteLength + endByteLength;
+
+  return Object.entries(buffers)
+    .filter(([t]) => offsets[t as ExportedAssetTypes] > emptyFileLength)
+    .map(([t, buffer]) => {
+      const type = t as ExportedAssetTypes;
+      const offset = offsets[type];
+      const bufferView = buffer.subarray(0, offset);
+
+      return {
+        fileName: `${FILE_NAMES[type]}.geojson`,
+        extensions: [".geojson"],
+        mimeTypes: ["text/geo+json"],
+        description: "GeoJSON File",
+        blob: new Blob([bufferView], {
+          type: "text/geo+json",
+        }),
+      };
+    });
+};
+
+const buildSimulationResultsReader = (resultsReader?: ResultsReader) => {
+  if (!resultsReader) {
+    return {
+      junction: () => ({}),
+      tank: () => ({}),
+      reservoir: () => ({}),
+      pipe: () => ({}),
+      pump: () => ({}),
+      valve: () => ({}),
+    };
+  }
+
+  return {
+    junction: (asset: Asset) => resultsReader.getJunction(asset.id) ?? {},
+    tank: (asset: Asset) => resultsReader.getTank(asset.id) ?? {},
+    reservoir: (asset: Asset) => resultsReader.getReservoir(asset.id) ?? {},
+    pipe: (asset: Asset) => resultsReader.getPipe(asset.id) ?? {},
+    pump: (asset: Asset) => resultsReader.getPump(asset.id) ?? {},
+    valve: (asset: Asset) => resultsReader.getValve(asset.id) ?? {},
+  };
+};
+
+const allocateBuffers = (size: number) => {
+  const buffers: Record<ExportedAssetTypes, Uint8Array> = {
+    junction: new Uint8Array(size),
+    reservoir: new Uint8Array(size),
+    tank: new Uint8Array(size),
+    pipe: new Uint8Array(size),
+    pump: new Uint8Array(size),
+    valve: new Uint8Array(size),
+    customerPoint: new Uint8Array(size),
+  };
+  const offsets: Record<ExportedAssetTypes, number> = {
+    junction: 0,
+    reservoir: 0,
+    tank: 0,
+    pipe: 0,
+    pump: 0,
+    valve: 0,
+    customerPoint: 0,
+  };
+
+  return { buffers, offsets };
+};
+
+const prefixSimulationKeys = (simulationResults: Record<string, unknown>) => {
+  const prefixed: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(simulationResults)) {
+    if (key !== "type") prefixed[`sim_${key}`] = value;
+  }
+  return prefixed;
+};
+
+const localizePropertyKeys = (
+  properties: Record<string, unknown>,
+  assetType: ExportedAssetTypes,
+  resolvePropertyName: PropertyNameResolver,
+): Record<string, unknown> => {
+  const localized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(properties)) {
+    localized[resolvePropertyName(assetType, key)] = value;
+  }
+  return localized;
+};
+
+const assetToGeoJson = (
+  hydraulicModel: HydraulicModel,
+  asset: Asset,
+  resolvePropertyName: PropertyNameResolver,
+  simulationResults: Record<string, unknown> = {},
+  transformCoord: (p: Position) => Position = (p) => p,
+  defaults?: ExportDefaults,
+) => {
+  const buildConnection = (connection: number) => {
+    const asset = hydraulicModel.assets.get(connection);
+    return asset?.label;
+  };
+
+  const replacer = function (
+    this: unknown,
+    _: string,
+    value: string | number | boolean | object | null,
+  ) {
+    if (value === null) return undefined;
+    if (typeof value !== "number") return value;
+    if (Math.trunc(value) === value) return value;
+
+    const precision = Array.isArray(this)
+      ? COORDINATE_DECIMAL_PLACES
+      : NUM_DECIMAL_PLACES;
+    return Number(value.toFixed(precision));
+  };
+
+  const geometry = asset?.feature.geometry;
+  const transformedGeometry =
+    geometry?.type === "Point"
+      ? {
+          ...geometry,
+          coordinates: transformCoord(geometry.coordinates),
+        }
+      : {
+          ...geometry,
+          coordinates: geometry.coordinates.map(transformCoord),
+        };
+
+  const mapped: Feature = {
+    type: "Feature",
+    geometry: transformedGeometry as Feature["geometry"],
+    properties: {
+      ...resolveExportProperties(
+        asset,
+        asset.feature.properties as Record<string, unknown>,
+        defaults,
+      ),
+      ...prefixSimulationKeys(simulationResults),
+    },
+  };
+
+  if (mapped.properties !== null) {
+    for (const key of Object.keys(mapped.properties)) {
+      if (!isExportableField(asset.type, key)) delete mapped.properties[key];
+    }
+  }
+
+  if (
+    "properties" in mapped &&
+    mapped.properties !== null &&
+    "connections" in (mapped.properties as object)
+  ) {
+    const [start, end] = mapped.properties?.connections as number[];
+    delete mapped.properties["connections"];
+    mapped.properties["startNode"] = buildConnection(start);
+    mapped.properties["endNode"] = buildConnection(end);
+  }
+
+  if (mapped.properties !== null) {
+    mapped.properties = localizePropertyKeys(
+      mapped.properties,
+      asset.type,
+      resolvePropertyName,
+    );
+  }
+
+  return JSON.stringify(mapped, replacer);
+};
+
+const estimateEntrySize = (
+  hydraulicModel: HydraulicModel,
+  resolvePropertyName: PropertyNameResolver,
+) => {
+  const asset = hydraulicModel.assets.values().next().value;
+  if (!asset) return 0;
+  return assetToGeoJson(hydraulicModel, asset, resolvePropertyName).length;
+};
+
+const encodeHeader = (
+  buffers: Record<AssetType, Uint8Array>,
+  offsets: Record<AssetType, number>,
+  textEncoder: TextEncoder,
+  header: string,
+) => {
+  const types = Object.keys(buffers) as AssetType[];
+  types.forEach((type) => {
+    const buffer = buffers[type];
+    const { written } = textEncoder.encodeInto(header, buffer);
+    offsets[type] += written;
+  });
+};
+
+const encodeEnd = (
+  buffers: Record<ExportedAssetTypes, Uint8Array>,
+  offsets: Record<ExportedAssetTypes, number>,
+  textEncoder: TextEncoder,
+) => {
+  const types = Object.keys(buffers) as ExportedAssetTypes[];
+  types.forEach((type) => {
+    const buffer = buffers[type];
+    const offset = offsets[type];
+    const view = buffer.subarray(offset);
+    const { written } = textEncoder.encodeInto(GEOJSON_END, view);
+    offsets[type] += written;
+  });
+};
+
+const removeTrailingComma = (
+  buffers: Record<ExportedAssetTypes, Uint8Array>,
+  offsets: Record<ExportedAssetTypes, number>,
+  headerLength: number,
+) => {
+  const types = Object.keys(buffers) as ExportedAssetTypes[];
+
+  types.forEach((type) => {
+    if (offsets[type] > headerLength) {
+      offsets[type] -= 1;
+    }
+  });
+};

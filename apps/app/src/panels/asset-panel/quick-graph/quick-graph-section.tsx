@@ -1,0 +1,405 @@
+import { useCallback, useMemo, useRef } from "react";
+import { useAtom, useAtomValue } from "jotai";
+import { PinIcon, PinOffIcon } from "src/icons";
+import { Button } from "src/components/elements";
+import { Selector } from "@epanet-js/ui-kit";
+import { useTranslate } from "src/hooks/use-translate";
+import { useTranslateUnit } from "src/hooks/use-translate-unit";
+import { projectSettingsAtom } from "src/state/project-settings";
+import {
+  stagingModelDerivedAtom,
+  simulationDerivedAtom,
+} from "src/state/derived-branch-state";
+import { simulationStepAtom } from "src/state/simulation";
+import { worktreeAtom } from "src/state/scenarios";
+import {
+  assetPanelFooterAtom,
+  quickGraphPropertyAtom,
+  DEFAULT_FOOTER_HEIGHT,
+  type QuickGraphAssetType,
+  type QuickGraphPropertyByAssetType,
+} from "src/state/quick-graph";
+import type { QuantityProperty } from "@epanet-js/project-settings";
+import { getDecimals } from "@epanet-js/project-settings";
+import type { TimeSeries } from "src/simulation/epanet/eps-results-reader";
+import { type AssetId, type Valve } from "@epanet-js/hydraulic-model";
+import { useTimeSeries } from "./use-time-series";
+import { QuickGraphChart } from "./quick-graph-chart";
+import { useChangeTimestep } from "src/commands/change-timestep";
+import { RingSpinner } from "src/components/ring-spinner";
+
+const QUICK_GRAPH_PROPERTIES: {
+  [K in QuickGraphAssetType]: {
+    value: QuickGraphPropertyByAssetType[K];
+    labelKey: string;
+    quantityKey: QuantityProperty;
+  }[];
+} = {
+  junction: [
+    { value: "pressure", labelKey: "pressure", quantityKey: "pressure" },
+    { value: "head", labelKey: "head", quantityKey: "head" },
+    { value: "demand", labelKey: "actualDemand", quantityKey: "actualDemand" },
+  ],
+  pipe: [
+    { value: "flow", labelKey: "flow", quantityKey: "flow" },
+    { value: "velocity", labelKey: "velocity", quantityKey: "velocity" },
+    {
+      value: "headloss",
+      labelKey: "unitHeadloss",
+      quantityKey: "unitHeadloss",
+    },
+  ],
+  pump: [
+    { value: "flow", labelKey: "flow", quantityKey: "flow" },
+    { value: "head", labelKey: "pumpHead", quantityKey: "head" },
+    {
+      value: "setting",
+      labelKey: "pump.relativeSpeedSetting",
+      quantityKey: "speed",
+    },
+    { value: "status", labelKey: "status", quantityKey: "status" },
+  ],
+  valve: [
+    { value: "flow", labelKey: "flow", quantityKey: "flow" },
+    { value: "velocity", labelKey: "velocity", quantityKey: "velocity" },
+    { value: "headloss", labelKey: "headlossShort", quantityKey: "headloss" },
+    { value: "setting", labelKey: "setting", quantityKey: "tcvSetting" },
+  ],
+  tank: [
+    { value: "level", labelKey: "level", quantityKey: "level" },
+    { value: "volume", labelKey: "volume", quantityKey: "volume" },
+    { value: "netFlow", labelKey: "netFlow", quantityKey: "netFlow" },
+    { value: "pressure", labelKey: "pressure", quantityKey: "pressure" },
+    { value: "head", labelKey: "head", quantityKey: "head" },
+  ],
+  reservoir: [
+    { value: "pressure", labelKey: "pressure", quantityKey: "pressure" },
+    { value: "head", labelKey: "head", quantityKey: "head" },
+    { value: "netFlow", labelKey: "netFlow", quantityKey: "netFlow" },
+  ],
+};
+
+const QUALITY_OPTIONS: {
+  value: string;
+  quantityKey: QuantityProperty;
+}[] = [
+  { value: "waterAge", quantityKey: "waterAge" },
+  { value: "waterTrace", quantityKey: "waterTrace" },
+  { value: "chemicalConcentration", quantityKey: "chemicalConcentration" },
+];
+
+export const useShowQuickGraph = () => {
+  const simulation = useAtomValue(simulationDerivedAtom);
+  const hadValidSimulationRef = useRef(false);
+
+  const hasCompletedSimulation =
+    "epsResultsReader" in simulation && !!simulation.epsResultsReader;
+
+  if (hasCompletedSimulation) {
+    hadValidSimulationRef.current =
+      simulation.epsResultsReader!.timestepCount > 1;
+  }
+
+  if (hasCompletedSimulation) {
+    return hadValidSimulationRef.current;
+  }
+
+  if (simulation.status === "running") {
+    return hadValidSimulationRef.current;
+  }
+
+  return false;
+};
+
+interface QuickGraphSectionProps {
+  assetType: QuickGraphAssetType;
+  assetId: AssetId;
+  data: TimeSeries | null;
+  baseData: TimeSeries | null;
+  isLoading: boolean;
+}
+
+const getValveSettingQuantityKey = (valve: Valve): QuantityProperty | null => {
+  if (valve.kind === "tcv") return null;
+  if (["psv", "prv", "pbv"].includes(valve.kind)) return "pressure";
+  if (valve.kind === "fcv") return "flow";
+  return null;
+};
+
+const STATUS_OPEN = 1;
+const STATUS_CLOSED = 0;
+
+const QuickGraphSection = ({
+  assetType,
+  assetId,
+  data,
+  baseData,
+  isLoading,
+}: QuickGraphSectionProps) => {
+  const translate = useTranslate();
+  const translateUnit = useTranslateUnit();
+  const [footerState, setFooterState] = useAtom(assetPanelFooterAtom);
+  const [propertyByType, setPropertyByType] = useAtom(quickGraphPropertyAtom);
+  const simulation = useAtomValue(simulationDerivedAtom);
+  const simulationStep = useAtomValue(simulationStepAtom);
+  const worktree = useAtomValue(worktreeAtom);
+  const { units, formatting } = useAtomValue(projectSettingsAtom);
+  const hydraulicModel = useAtomValue(stagingModelDerivedAtom);
+  const { changeTimestep } = useChangeTimestep();
+
+  const isInScenario = worktree.activeBranchId !== worktree.mainId;
+  const activeBranch = worktree.branches.get(worktree.activeBranchId);
+  const scenarioName = isInScenario ? (activeBranch?.name ?? null) : null;
+  const baseLabel = isInScenario ? translate("scenarios.main") : null;
+
+  const selectedProperty = propertyByType[assetType];
+  const selectedOption =
+    QUICK_GRAPH_PROPERTIES[assetType].find(
+      (opt) => opt.value === selectedProperty,
+    ) ??
+    QUALITY_OPTIONS.find(
+      (opt: { value: string; quantityKey: QuantityProperty }) =>
+        opt.value === selectedProperty,
+    );
+  const isStatusProperty = selectedProperty === "status";
+
+  const toStatusStep = (code: number) =>
+    code > 2 ? STATUS_OPEN : STATUS_CLOSED;
+
+  const valueLabels = useMemo(() => {
+    if (!isStatusProperty) return null;
+
+    if (assetType == "pump") {
+      return new Map([
+        [STATUS_OPEN, translate("pump.on")],
+        [STATUS_CLOSED, translate("pump.off")],
+      ]);
+    }
+
+    return new Map([
+      [STATUS_OPEN, translate("statusOpen")],
+      [STATUS_CLOSED, translate("statusClosed")],
+    ]);
+  }, [isStatusProperty, translate, assetType]);
+
+  const decimals = useMemo(() => {
+    if (!selectedOption) return 0;
+    if (isStatusProperty) return 0;
+    let quantityKey = selectedOption.quantityKey;
+    if (assetType === "valve" && selectedProperty === "setting") {
+      const valve = hydraulicModel.assets.get(assetId) as Valve | undefined;
+      if (valve) {
+        quantityKey = getValveSettingQuantityKey(valve) ?? quantityKey;
+      }
+    }
+    return getDecimals(formatting, quantityKey) ?? 0;
+  }, [
+    selectedOption,
+    assetType,
+    selectedProperty,
+    isStatusProperty,
+    assetId,
+    hydraulicModel,
+    formatting,
+  ]);
+
+  const values = useMemo(() => {
+    if (!data) return [];
+    const raw = Array.from(data.values);
+    return isStatusProperty ? raw.map(toStatusStep) : raw;
+  }, [data, isStatusProperty]);
+
+  const baseValues = useMemo(() => {
+    if (!baseData) return null;
+    const raw = Array.from(baseData.values);
+    return isStatusProperty ? raw.map(toStatusStep) : raw;
+  }, [baseData, isStatusProperty]);
+  const timeStepIndex = simulationStep ?? 0;
+
+  const propertyOptions = useMemo(() => {
+    const hasCompletedSimulation =
+      "epsResultsReader" in simulation && !!simulation.epsResultsReader;
+    const qualityType = hasCompletedSimulation
+      ? simulation.epsResultsReader?.qualityType
+      : null;
+
+    const baseOptions = QUICK_GRAPH_PROPERTIES[assetType];
+    const options =
+      qualityType === "age"
+        ? [
+            ...baseOptions,
+            {
+              value: "waterAge" as const,
+              labelKey: "waterAge",
+              quantityKey: "waterAge" as QuantityProperty,
+            },
+          ]
+        : qualityType === "trace"
+          ? [
+              ...baseOptions,
+              {
+                value: "waterTrace" as const,
+                labelKey: "waterTrace",
+                quantityKey: "waterTrace" as QuantityProperty,
+              },
+            ]
+          : qualityType === "chemical"
+            ? [
+                ...baseOptions,
+                {
+                  value: "chemicalConcentration" as const,
+                  labelKey: "chemicalConcentration",
+                  quantityKey: "chemicalConcentration" as QuantityProperty,
+                },
+              ]
+            : baseOptions;
+
+    return options.map((opt) => {
+      const label = translate(opt.labelKey);
+      let quantityKey = opt.quantityKey;
+      if (assetType === "valve" && opt.value === "setting") {
+        const valve = hydraulicModel.assets.get(assetId) as Valve | undefined;
+        if (valve) {
+          quantityKey = getValveSettingQuantityKey(valve) ?? opt.quantityKey;
+        }
+      }
+      const unit = units[quantityKey];
+      return {
+        value: opt.value,
+        label: unit ? `${label} (${translateUnit(unit)})` : label,
+      };
+    });
+  }, [
+    assetType,
+    assetId,
+    hydraulicModel,
+    translate,
+    translateUnit,
+    units,
+    simulation,
+  ]);
+
+  const handlePropertyChange = useCallback(
+    (value: QuickGraphPropertyByAssetType[typeof assetType]) => {
+      setPropertyByType((prev) => ({
+        ...prev,
+        [assetType]: value,
+      }));
+    },
+    [assetType, setPropertyByType],
+  );
+
+  const handlePinToggle = useCallback(() => {
+    setFooterState((prev) => ({
+      isPinned: !prev.isPinned,
+      height: DEFAULT_FOOTER_HEIGHT,
+    }));
+  }, [setFooterState]);
+
+  const handleIntervalClick = useCallback(
+    (intervalIndex: number) => {
+      void changeTimestep(intervalIndex, "quick-graph");
+    },
+    [changeTimestep],
+  );
+
+  const { isPinned } = footerState;
+
+  const pinButton = (
+    <div className="flex h-8 -my-2">
+      <Button
+        variant="quiet"
+        onClick={handlePinToggle}
+        title={isPinned ? translate("unpin") : translate("pin")}
+        aria-label={isPinned ? translate("unpin") : translate("pin")}
+        data-state-on={isPinned || undefined}
+      >
+        {isPinned ? <PinOffIcon /> : <PinIcon />}
+      </Button>
+    </div>
+  );
+
+  return (
+    <div className="flex flex-col flex-1 min-h-0 pl-5">
+      <div className="flex items-center justify-between text-size-base font-semibold h-8">
+        {translate("quickGraph")}
+        {pinButton}
+      </div>
+      <div className="w-max pb-2">
+        {propertyOptions.length > 1 ? (
+          <Selector
+            options={propertyOptions}
+            selected={selectedProperty}
+            onChange={handlePropertyChange}
+            styleOptions={{
+              border: true,
+              textSize: "text-size-base",
+              paddingY: 1,
+            }}
+          />
+        ) : (
+          <span className="text-size-base text-default py-1">
+            {propertyOptions[0]?.label}
+          </span>
+        )}
+      </div>
+
+      <div className="relative flex-1 min-h-[120px]">
+        {isLoading && (
+          <div className="absolute inset-0 flex items-center justify-center bg-base/50/50 z-10">
+            <RingSpinner />
+          </div>
+        )}
+        {data !== null ? (
+          <div className="absolute inset-0">
+            <QuickGraphChart
+              values={values}
+              baseValues={baseValues}
+              baseLabel={baseLabel}
+              intervalSeconds={data.intervalSeconds}
+              intervalsCount={data.intervalsCount}
+              currentIntervalIndex={timeStepIndex}
+              decimals={decimals}
+              valueLabels={valueLabels}
+              onIntevalClick={handleIntervalClick}
+              scenarioName={scenarioName}
+            />
+          </div>
+        ) : (
+          <div className="h-full flex items-center justify-center text-subtle text-size-small">
+            {translate("errorLoadingData")}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+};
+
+export const QuickGraph = QuickGraphSection;
+
+export function useQuickGraph<T extends QuickGraphAssetType>(
+  assetId: number,
+  assetType: T,
+) {
+  const showQuickGraph = useShowQuickGraph();
+  const [propertyByType] = useAtom(quickGraphPropertyAtom);
+  const selectedProperty = propertyByType[assetType];
+
+  const { data, baseData, isLoading } = useTimeSeries({
+    assetId,
+    assetType,
+    property: selectedProperty,
+  });
+
+  const footer = showQuickGraph ? (
+    <QuickGraph
+      assetId={assetId}
+      assetType={assetType}
+      data={data}
+      baseData={baseData}
+      isLoading={isLoading}
+    />
+  ) : undefined;
+
+  return { footer };
+}

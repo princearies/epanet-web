@@ -1,0 +1,199 @@
+import { BaseDialog, useDialogState } from "src/components/dialog";
+import { Keycap } from "src/components/elements";
+import React from "react";
+import { localizeKeybinding } from "src/infra/i18n";
+import { useTranslate } from "src/hooks/use-translate";
+import { showSimulationSettingsShortcut } from "src/commands/show-simulation-settings";
+import { showControlsShortcut } from "src/commands/show-controls";
+import { getIsMac } from "src/infra/i18n/mac";
+import { useFeatureFlag } from "src/hooks/use-feature-flags";
+import { toggleLeftPanelShortcut } from "src/commands/toggle-left-panel";
+import { toggleSidePanelShortcut } from "src/commands/toggle-side-panel";
+import { toggleBottomPanelShortcut } from "src/commands/toggle-bottom-panel";
+import { selectionModeShortcut } from "src/commands/set-area-selection-mode";
+import { traceSelectModeShortcut } from "src/commands/set-trace-select-mode";
+import { changeActiveTopologyShortcut } from "src/commands/change-selected-assets-active-topology-status";
+import {
+  previousTimestepShortcut,
+  nextTimestepShortcut,
+} from "src/commands/change-timestep";
+import { togglePlaybackShortcut } from "src/commands/toggle-playback";
+import {
+  toggleBranchShortcut,
+  goToMainShortcut,
+} from "src/commands/scenario-shortcuts";
+import { createScenarioShortcut } from "src/commands/create-scenario";
+
+export const SEARCH_KEYBINDING = "Command+k";
+
+type KeybordShortcut = string;
+type TranslationKey = string;
+
+type Shortcut = {
+  binding: KeybordShortcut;
+  description: TranslationKey | TranslationKey[];
+};
+
+type ShortcutSection = {
+  group: TranslationKey;
+  shortcuts: Shortcut[];
+};
+
+export function CheatsheetDialog() {
+  const { closeDialog } = useDialogState();
+  const translate = useTranslate();
+  const isMac = useFeatureFlag("FLAG_MAC");
+  const isSelectionSetsOn = useFeatureFlag("FLAG_SELECTION_SETS");
+
+  const BINDINGS: ShortcutSection[] = [
+    {
+      group: "keyboardShortcuts.fileManagement",
+      shortcuts: [
+        { binding: "Alt+N", description: "newProject" },
+        {
+          binding: "Command+O",
+          description: "openProject",
+        },
+        { binding: "Command+S", description: "save" },
+        { binding: "Command+Shift+S", description: "saveAs" },
+      ],
+    },
+    {
+      group: "keyboardShortcuts.interface",
+      shortcuts: [
+        { binding: "B", description: "toggleSatellite" },
+        {
+          binding: toggleLeftPanelShortcut,
+          description: isSelectionSetsOn
+            ? "toggleLeftPanel"
+            : "networkReview.toggle",
+        },
+        {
+          binding: toggleBottomPanelShortcut,
+          description: "toggleBottomPanel",
+        },
+        {
+          binding: toggleSidePanelShortcut,
+          description: "toggleSidePanel",
+        },
+        { binding: SEARCH_KEYBINDING, description: "assetSearch.title" },
+        { binding: "?", description: "keyboardShortcuts.title" },
+      ],
+    },
+    {
+      group: "keyboardShortcuts.mapTools",
+      shortcuts: [
+        { binding: "1", description: "select" },
+        { binding: "2", description: "junction" },
+        { binding: "3", description: "reservoir" },
+        { binding: "4", description: "tank" },
+        { binding: "5", description: "pipe" },
+        { binding: "6", description: "pump" },
+        { binding: "7", description: "valve" },
+        { binding: "8", description: "customerPoint" as const },
+      ],
+    },
+    {
+      group: "keyboardShortcuts.simulation",
+      shortcuts: [
+        { binding: "Shift+Enter", description: "simulate" },
+        {
+          binding: showSimulationSettingsShortcut,
+          description: "simulationSettings.title",
+        },
+        { binding: "Alt+R", description: "viewReport" },
+        {
+          binding: showControlsShortcut,
+          description: "controls.title",
+        },
+        {
+          binding: togglePlaybackShortcut,
+          description: "togglePlayback",
+        },
+        {
+          binding: previousTimestepShortcut,
+          description: "previousTimestep",
+        },
+        {
+          binding: nextTimestepShortcut,
+          description: "nextTimestep",
+        },
+      ],
+    },
+    {
+      group: "keyboardShortcuts.scenarios",
+      shortcuts: [
+        {
+          binding: createScenarioShortcut,
+          description: "createScenario",
+        },
+        {
+          binding: toggleBranchShortcut,
+          description: "toggleBranch",
+        },
+        {
+          binding: goToMainShortcut,
+          description: "goToMain",
+        },
+      ],
+    },
+    {
+      group: "keyboardShortcuts.editingSelection",
+      shortcuts: [
+        {
+          binding: selectionModeShortcut,
+          description: "areaSelection.tool",
+        },
+        {
+          binding: traceSelectModeShortcut,
+          description: "traceSelection.tool",
+        },
+        { binding: "Command+a", description: "selectAll" },
+        {
+          binding: changeActiveTopologyShortcut,
+          description: "toggleActiveTopology",
+        },
+        {
+          binding: "Esc",
+          description: ["exit", "clearSelection"],
+        },
+        { binding: "BACKSPACE", description: "delete" },
+        { binding: "Command+z", description: "undo" },
+        { binding: "Command+y", description: "redo" },
+      ],
+    },
+  ];
+
+  return (
+    <BaseDialog
+      title={translate("keyboardShortcuts.title")}
+      size="lg"
+      isOpen={true}
+      onClose={closeDialog}
+    >
+      <div className="p-4 columns-1 md:columns-2">
+        {BINDINGS.map((section) => (
+          <div key={section.group} className="break-inside-avoid mb-6">
+            <h2 className="text-size-base font-bold mb-2 text-default">
+              {translate(section.group)}
+            </h2>
+            <div className="space-y-2">
+              {section.shortcuts.map((item) => (
+                <div key={item.binding} className="flex items-start gap-4">
+                  <Keycap className="w-28 shrink-0">
+                    {localizeKeybinding(item.binding, isMac || getIsMac())}
+                  </Keycap>
+                  <p className="text-size-small pt-1">
+                    {Array.isArray(item.description)
+                      ? item.description.map((k) => translate(k)).join(" /")
+                      : translate(item.description)}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </BaseDialog>
+  );
+}

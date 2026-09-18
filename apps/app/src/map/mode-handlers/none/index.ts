@@ -1,0 +1,508 @@
+import type { HandlerContext } from "src/types";
+import { cursorStyleAtom } from "src/state/map";
+import { Mode } from "src/state/mode";
+import { useSetAtom, useAtomValue } from "jotai";
+import { useRef } from "react";
+import { modeAtom } from "src/state/mode";
+import { getMapCoord } from "../utils";
+import { useSelection, USelection } from "src/selection";
+import { useKeyboardState } from "src/keyboard/use-keyboard-state";
+import { searchNearbyRenderedFeatures } from "src/map/search";
+import { clickableLayers } from "src/map/layers/layer";
+
+import { getNode } from "src/hydraulic-model";
+import {
+  moveNode,
+  mergeNodes,
+  moveCustomerPoint,
+} from "src/hydraulic-model/model-operations";
+import { nodesShareLink } from "@epanet-js/hydraulic-model";
+import { useMoveState } from "./move-state";
+import { useCustomerPointMoveState } from "./customer-point-move-state";
+import noop from "lodash/noop";
+import { useElevations } from "src/hooks/use-elevations";
+import { CustomerPoint } from "@epanet-js/hydraulic-model";
+import { useSnapping } from "../hooks/use-snapping";
+import throttle from "lodash/throttle";
+import { useClickedAsset } from "../utils";
+import { modelFactoriesAtom } from "src/state/model-factories";
+import { useMomentTransaction } from "src/hooks/persistence/use-moment-transaction";
+
+const stateUpdateTime = 16;
+
+const isMovementSignificant = (
+  startPoint: mapboxgl.Point,
+  endPoint: mapboxgl.Point,
+  threshold = 5,
+) => {
+  const dx = endPoint.x - startPoint.x;
+  const dy = endPoint.y - startPoint.y;
+
+  const distanceSquared = dx * dx + dy * dy;
+  const thresholdSquared = threshold * threshold;
+
+  return distanceSquared >= thresholdSquared;
+};
+
+export function useNoneHandlers({
+  selection,
+  map,
+  hydraulicModel,
+  units,
+  readonly = false,
+}: HandlerContext): Handlers {
+  const isUpdatingRef = useRef(false);
+  const { getClickedAsset } = useClickedAsset(map, hydraulicModel.assets);
+  const { assetFactory, labelManager } = useAtomValue(modelFactoriesAtom);
+
+  const setMode = useSetAtom(modeAtom);
+  const {
+    clearSelection,
+    isSelected,
+    toggleSingleSelection,
+    extendSelection,
+    removeFromSelection,
+    getSelectionIds,
+    selectCustomerPoint,
+    selectAsset,
+    isCustomerPointSelected,
+    extendCustomerPointSelection,
+    removeCustomerPointFromSelection,
+  } = useSelection(selection);
+  const { isShiftHeld } = useKeyboardState();
+  const {
+    setStartPoint,
+    startPoint,
+    updateMoveWithSnapping,
+    resetMove,
+    isMoving,
+    startCommit,
+    finishCommit,
+    isCommitting,
+    moveActivated,
+  } = useMoveState();
+  const setCursor = useSetAtom(cursorStyleAtom);
+  const { fetchElevation, prefetchTileThrottled } = useElevations(
+    units.elevation,
+  );
+  const { transact } = useMomentTransaction();
+  const { findSnappingCandidate } = useSnapping(map, hydraulicModel.assets);
+  const {
+    setStartPoint: setCustomerPointStartPoint,
+    startPoint: customerPointStartPoint,
+    updateMove: updateCustomerPointMove,
+    resetMove: resetCustomerPointMove,
+    isMovingCustomerPoint,
+    moveActivated: customerPointMoveActivated,
+  } = useCustomerPointMoveState();
+
+  const fastMovePointer = (point: mapboxgl.Point) => {
+    if (!map) return;
+
+    const features = searchNearbyRenderedFeatures(map, {
+      point,
+      distance: 7,
+      layers: clickableLayers,
+    });
+
+    const visibleFeatures = features.filter((f) => !f.state || !f.state.hidden);
+
+    let hasClickableElement = visibleFeatures.length > 0;
+
+    if (!hasClickableElement) {
+      const pickedObjects = map.pickOverlayObjects({
+        x: point.x,
+        y: point.y,
+        radius: 7,
+      });
+
+      for (const pickInfo of pickedObjects) {
+        if (pickInfo.layer?.id === "customer-points-layer" && pickInfo.object) {
+          hasClickableElement = true;
+          break;
+        }
+      }
+    }
+
+    setCursor(hasClickableElement ? "pointer" : "");
+  };
+
+  const skipMove = (e: mapboxgl.MapMouseEvent | mapboxgl.MapTouchEvent) => {
+    fastMovePointer(e.point);
+  };
+
+  const startElevationFetch = () => {
+    isUpdatingRef.current = true;
+    setCursor("wait");
+  };
+
+  const finishElevationFetch = () => {
+    isUpdatingRef.current = false;
+    setCursor("default");
+  };
+
+  const getClickedCustomerPoint = (
+    e: mapboxgl.MapMouseEvent | mapboxgl.MapTouchEvent,
+  ): CustomerPoint | null => {
+    const pickedObjects = map.pickOverlayObjects({
+      x: e.point.x,
+      y: e.point.y,
+      radius: 7,
+    });
+
+    // Find the closest picked customer point, if any
+    let closest: CustomerPoint | null = null;
+    let closestDistSq = Infinity;
+    for (const pickInfo of pickedObjects) {
+      if (pickInfo.layer?.id !== "customer-points-layer" || !pickInfo.object) {
+        continue;
+      }
+      const cp = pickInfo.object as CustomerPoint;
+      const [lng, lat] = cp.coordinates;
+      const { x, y } = map.map.project([lng, lat]);
+      const dx = x - e.point.x;
+      const dy = y - e.point.y;
+      const distSq = dx * dx + dy * dy;
+      if (distSq < closestDistSq) {
+        closestDistSq = distSq;
+        closest = cp;
+      }
+    }
+
+    return closest;
+  };
+
+  const handleUp: Handlers["up"] = (e) => {
+    if (isUpdatingRef.current) return;
+
+    if (readonly) {
+      resetMove();
+      resetCustomerPointMove();
+      return;
+    }
+
+    e.preventDefault();
+
+    if (isMovingCustomerPoint) {
+      const movingCustomerPointId = USelection.singleCustomerPointId(selection);
+      if (customerPointMoveActivated && movingCustomerPointId !== null) {
+        const newCoordinates = getMapCoord(e);
+        const moment = moveCustomerPoint(hydraulicModel, {
+          customerPointId: movingCustomerPointId,
+          newCoordinates,
+        });
+        transact(moment);
+      }
+      resetCustomerPointMove();
+      return;
+    }
+
+    if (!USelection.isSingleAsset(selection) || !isMoving) {
+      return skipMove(e);
+    }
+
+    const [assetId] = getSelectionIds();
+    const node = getNode(hydraulicModel.assets, assetId);
+    if (!node) {
+      return skipMove(e);
+    }
+
+    let newCoordinates = getMapCoord(e);
+    let pipeIdToSplit: number | undefined;
+
+    const connectedLinkIds = hydraulicModel.topology.getLinks(assetId);
+    const excludeIds = [assetId, ...connectedLinkIds];
+    const snappingCandidate = findSnappingCandidate(
+      e,
+      newCoordinates,
+      excludeIds,
+    );
+
+    if (snappingCandidate && snappingCandidate.type !== "pipe") {
+      const shareLink = nodesShareLink(
+        hydraulicModel.topology,
+        assetId,
+        snappingCandidate.id,
+      );
+
+      if (!shareLink) {
+        const moment = mergeNodes(hydraulicModel, {
+          sourceNodeId: assetId,
+          targetNodeId: snappingCandidate.id,
+          lengthUnit: units.length,
+        });
+        transact(moment);
+        selectAsset(assetId);
+      }
+      clearSelection();
+      resetMove();
+      return;
+    }
+
+    if (snappingCandidate && snappingCandidate.type === "pipe") {
+      newCoordinates = snappingCandidate.coordinates as [number, number];
+      pipeIdToSplit = snappingCandidate.id;
+    }
+
+    const shouldCommit = moveActivated;
+
+    if (!shouldCommit) {
+      resetMove();
+      return;
+    }
+
+    const settleCommit = () => {
+      setTimeout(() => {
+        finishCommit();
+        finishElevationFetch();
+      }, stateUpdateTime);
+    };
+
+    startCommit();
+    startElevationFetch();
+
+    const lngLatForElevation = pipeIdToSplit
+      ? { lng: newCoordinates[0], lat: newCoordinates[1] }
+      : e.lngLat;
+
+    fetchElevation(lngLatForElevation)
+      .then((newElevationOrFallback) => {
+        const moment = moveNode(hydraulicModel, {
+          nodeId: assetId,
+          newCoordinates,
+          newElevation: newElevationOrFallback,
+          shouldUpdateCustomerPoints: true,
+          pipeIdToSplit,
+          lengthUnit: units.length,
+          assetFactory,
+          labelManager,
+          precision: map.getPrecision(),
+        });
+        transact(moment);
+        resetMove();
+        settleCommit();
+      })
+      .catch(() => {
+        resetMove();
+        settleCommit();
+      });
+  };
+
+  const handlers: Handlers = {
+    double: noop,
+    down: (e) => {
+      if (isUpdatingRef.current) return;
+
+      if (USelection.isSingleAsset(selection)) {
+        const [assetId] = getSelectionIds();
+        const clickedAsset = getClickedAsset(e);
+        if (!clickedAsset || clickedAsset.id !== assetId) {
+          return;
+        }
+
+        e.preventDefault();
+        const node = getNode(hydraulicModel.assets, assetId);
+        if (!node) return;
+
+        setStartPoint(e.point);
+        if (!readonly) {
+          setCursor("move");
+        }
+        return;
+      }
+
+      const selectedCustomerPointId =
+        USelection.singleCustomerPointId(selection);
+      if (selectedCustomerPointId !== null) {
+        const clickedCustomerPoint = getClickedCustomerPoint(e);
+        if (
+          !clickedCustomerPoint ||
+          clickedCustomerPoint.id !== selectedCustomerPointId
+        ) {
+          return;
+        }
+
+        e.preventDefault();
+        setCustomerPointStartPoint(clickedCustomerPoint, e.point);
+        if (!readonly) {
+          setCursor("move");
+        }
+        return;
+      }
+
+      return skipMove(e);
+    },
+    move: throttle(
+      (e: mapboxgl.MapMouseEvent | mapboxgl.MapTouchEvent) => {
+        e.preventDefault();
+
+        if (isUpdatingRef.current) return;
+
+        if (isMovingCustomerPoint) {
+          if (readonly) {
+            setCursor("not-allowed");
+            return;
+          }
+
+          const newCoordinates = getMapCoord(e);
+
+          if (!customerPointMoveActivated) {
+            const significant =
+              customerPointStartPoint &&
+              isMovementSignificant(
+                e.point,
+                customerPointStartPoint as mapboxgl.Point,
+              );
+            if (!significant) {
+              return;
+            }
+          }
+
+          setCursor("move");
+          updateCustomerPointMove(newCoordinates);
+          return;
+        }
+
+        if (!USelection.isSingleAsset(selection) || !isMoving || isCommitting) {
+          return skipMove(e);
+        }
+
+        if (readonly) {
+          setCursor("not-allowed");
+          return;
+        }
+
+        void prefetchTileThrottled(e.lngLat);
+
+        const [assetId] = getSelectionIds();
+        const asset = hydraulicModel.assets.get(assetId);
+        if (!asset || asset.isLink) return;
+
+        let newCoordinates = getMapCoord(e);
+        const noElevation = 0;
+        let snappingInfo: {
+          pipeSnappingPosition?: [number, number];
+          pipeId?: number;
+          nodeSnappingId?: number;
+        } = {};
+
+        const connectedLinkIds = hydraulicModel.topology.getLinks(asset.id);
+        const excludeIds = [asset.id, ...connectedLinkIds];
+        const snappingCandidate = findSnappingCandidate(
+          e,
+          newCoordinates,
+          excludeIds,
+        );
+
+        const isNodeSnapping =
+          snappingCandidate && snappingCandidate.type !== "pipe";
+        const isPipeSnapping =
+          snappingCandidate && snappingCandidate.type === "pipe";
+
+        const shareLink =
+          isNodeSnapping &&
+          nodesShareLink(
+            hydraulicModel.topology,
+            asset.id,
+            snappingCandidate.id,
+          );
+
+        setCursor(
+          isNodeSnapping ? (!shareLink ? "replace" : "not-allowed") : "move",
+        );
+
+        if (isPipeSnapping) {
+          newCoordinates = snappingCandidate.coordinates as [number, number];
+          snappingInfo = {
+            pipeSnappingPosition: snappingCandidate.coordinates as [
+              number,
+              number,
+            ],
+            pipeId: snappingCandidate.id,
+          };
+        } else if (isNodeSnapping) {
+          snappingInfo = {
+            nodeSnappingId: snappingCandidate.id,
+          };
+        }
+
+        const { putAssets } = moveNode(hydraulicModel, {
+          nodeId: asset.id,
+          newCoordinates,
+          newElevation: noElevation,
+          lengthUnit: units.length,
+          assetFactory,
+          labelManager,
+          precision: map.getPrecision(),
+        });
+
+        if (putAssets) {
+          if (!moveActivated) {
+            const significant =
+              startPoint && isMovementSignificant(e.point, startPoint);
+            if (!significant) {
+              return;
+            }
+          }
+          updateMoveWithSnapping(putAssets, snappingInfo);
+        }
+      },
+      16,
+      { trailing: false },
+    ),
+    up: handleUp,
+    click: (e) => {
+      if (isUpdatingRef.current) return;
+
+      const clickedAsset = getClickedAsset(e);
+      e.preventDefault();
+
+      if (!clickedAsset) {
+        const clickedCustomerPoint = getClickedCustomerPoint(e);
+
+        if (clickedCustomerPoint) {
+          if (isShiftHeld()) {
+            if (isCustomerPointSelected(clickedCustomerPoint.id)) {
+              removeCustomerPointFromSelection(clickedCustomerPoint.id);
+            } else {
+              extendCustomerPointSelection(clickedCustomerPoint.id);
+            }
+          } else {
+            selectCustomerPoint(clickedCustomerPoint.id);
+          }
+          return;
+        }
+
+        if (isShiftHeld()) return;
+
+        clearSelection();
+        resetMove();
+        setMode({ mode: Mode.NONE });
+        return;
+      }
+
+      if (isShiftHeld()) {
+        if (isSelected(clickedAsset.id)) {
+          removeFromSelection(clickedAsset.id);
+        } else {
+          extendSelection(clickedAsset.id);
+        }
+      } else {
+        toggleSingleSelection(clickedAsset.id, clickedAsset.type);
+      }
+    },
+    exit() {
+      if (isMoving) {
+        resetMove();
+      } else if (isMovingCustomerPoint) {
+        resetCustomerPointMove();
+      } else {
+        resetMove();
+        resetCustomerPointMove();
+        clearSelection();
+      }
+    },
+  };
+
+  return handlers;
+}

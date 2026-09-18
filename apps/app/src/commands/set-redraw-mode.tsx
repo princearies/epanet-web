@@ -1,0 +1,50 @@
+import { useAtomValue, useSetAtom } from "jotai";
+import { useCallback } from "react";
+import { LinkAsset } from "src/hydraulic-model";
+import { useUserTracking } from "src/infra/user-tracking";
+import { USelection } from "src/selection";
+import { stagingModelDerivedAtom } from "src/state/derived-branch-state";
+import { ephemeralStateAtom } from "src/state/drawing";
+import { modeAtom, Mode } from "src/state/mode";
+import { selectionAtom } from "src/state/selection";
+
+export const redrawModeShortcut = "e";
+
+export const useSetRedrawMode = () => {
+  const hydraulicModel = useAtomValue(stagingModelDerivedAtom);
+  const selection = useAtomValue(selectionAtom);
+  const setMode = useSetAtom(modeAtom);
+  const setEphemeralState = useSetAtom(ephemeralStateAtom);
+  const userTracking = useUserTracking();
+
+  const setRedrawMode = useCallback(
+    ({ source }: { source: "shortcut" | "toolbar" | "context-menu" }) => {
+      const selectedAssetId = USelection.singleAssetId(selection);
+      if (selectedAssetId === null) return;
+
+      const selectedAsset = hydraulicModel.assets.get(selectedAssetId);
+
+      if (!selectedAsset || !selectedAsset.isLink) return;
+
+      const linkAsset = selectedAsset as LinkAsset;
+
+      userTracking.capture({
+        name: "asset.redrawStarted",
+        source,
+        type: linkAsset.type,
+      });
+
+      setEphemeralState({
+        type: "drawLink",
+        linkType: linkAsset.type,
+        snappingCandidate: null,
+        sourceLink: linkAsset,
+      });
+
+      setMode({ mode: Mode.REDRAW_LINK });
+    },
+    [selection, hydraulicModel, userTracking, setEphemeralState, setMode],
+  );
+
+  return setRedrawMode;
+};

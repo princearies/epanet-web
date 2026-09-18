@@ -1,0 +1,194 @@
+import { useState, useEffect, useMemo } from "react";
+import { captureError } from "src/infra/error-tracking";
+import { getFilesFromDataTransferItems } from "@placemarkio/flat-drop-files";
+import type { FileWithHandle } from "browser-fs-access";
+import { StyledDropOverlay } from "./elements";
+import { useTranslate } from "src/hooks/use-translate";
+import { useImportInp, inpExtension } from "src/commands/import-inp";
+import { useOpenProjectFile } from "src/commands/open-project";
+import { useConvertFile } from "src/commands/convert-model";
+import { converterForFile } from "src/lib/converters";
+import { useAvailableConverters } from "src/hooks/use-available-converters";
+import { usePermissions } from "src/hooks/use-permissions";
+import { projectExtension } from "src/commands/save-project";
+import { useUserTracking } from "src/infra/user-tracking";
+import { useUnsavedChangesCheck } from "src/commands/check-unsaved-changes";
+import { useAtomValue, useSetAtom } from "jotai";
+import { dialogAtom } from "src/state/dialog";
+
+type DropHandler = {
+  matches: (file: FileWithHandle) => boolean;
+  handle: (files: FileWithHandle[]) => void | Promise<void>;
+};
+
+/**
+ * From an event, get files, with handles for re-saving.
+ * Result is nullable.
+ */
+
+const stopWindowDrag = (event: DragEvent) => {
+  event.preventDefault();
+};
+
+const getFileExtension = (filename: string): string | null => {
+  const parts = filename.split(".");
+  if (parts.length > 1) {
+    const extension = parts[parts.length - 1];
+    return extension.toLowerCase();
+  }
+  return null;
+};
+
+const Drop = () => {
+  const translate = useTranslate();
+  const [dragging, setDragging] = useState<boolean>(false);
+  const checkUnsavedChanges = useUnsavedChangesCheck();
+  const importInp = useImportInp();
+  const openProjectFile = useOpenProjectFile();
+  const converters = useAvailableConverters();
+  const { canImportSynergi } = usePermissions();
+  const convertFile = useConvertFile();
+  const userTracking = useUserTracking();
+  const dialog = useAtomValue(dialogAtom);
+  const setDialogState = useSetAtom(dialogAtom);
+
+  const handlers: DropHandler[] = useMemo(
+    () => [
+      {
+        matches: (f: FileWithHandle) =>
+          f.name.toLowerCase().endsWith(projectExtension),
+        handle: (files: FileWithHandle[]) =>
+          openProjectFile(files[0], "dragDrop"),
+      },
+      {
+        matches: (f: FileWithHandle) =>
+          f.name.toLowerCase().endsWith(inpExtension),
+        handle: (files: FileWithHandle[]) => importInp(files, "dragDrop"),
+      },
+      {
+        matches: (f: FileWithHandle) =>
+          converterForFile(converters, f.name) !== null,
+        handle: (files: FileWithHandle[]) => {
+          const match = converterForFile(converters, files[0].name);
+          if (!match) return;
+
+          userTracking.capture({
+            name: "convertModel.started",
+            source: "dragDrop",
+            vendor: match.vendor,
+            canImportSynergi,
+          });
+          void convertFile(match.converter, match.vendor, files[0], "dragDrop");
+        },
+      },
+    ],
+    [
+      openProjectFile,
+      importInp,
+      converters,
+      convertFile,
+      userTracking,
+      canImportSynergi,
+    ],
+  );
+
+  useEffect(() => {
+    window.addEventListener("dragover", stopWindowDrag);
+    window.addEventListener("drop", stopWindowDrag);
+
+    return () => {
+      window.removeEventListener("dragover", stopWindowDrag);
+      window.removeEventListener("drop", stopWindowDrag);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (dialog && dialog.type !== "welcome") {
+      return;
+    }
+
+    const onDropFiles = (files: FileWithHandle[]) => {
+      if (!files.length) return;
+
+      userTracking.capture({
+        name: "files.dropped",
+        filenames: files.map((f) => f.name),
+        extensions: files.map((f) => getFileExtension(f.name)),
+        count: files.length,
+      });
+
+      const handler = handlers.find((h) => files.some(h.matches));
+      if (!handler) {
+        setDialogState({ type: "invalidFilesError" });
+        userTracking.capture({ name: "invalidFilesError.seen" });
+        return;
+      }
+
+      const matchingFiles = files.filter(handler.matches);
+      checkUnsavedChanges(() => void handler.handle(matchingFiles));
+    };
+
+    const onDragEnter = () => {
+      setDragging(true);
+    };
+
+    const onDragLeave = (event: DragEvent) => {
+      if (!event.relatedTarget) {
+        setDragging(false);
+        return;
+      }
+      const portals = document.querySelectorAll("[data-radix-portal]");
+      for (const portal of portals) {
+        if (
+          event.relatedTarget instanceof Node &&
+          portal.contains(event.relatedTarget)
+        ) {
+          setDragging(false);
+          return;
+        }
+      }
+    };
+
+    const onDrop = async (event: DragEvent) => {
+      setDragging(false);
+      const files = event.dataTransfer?.items
+        ? await getFilesFromDataTransferItems(event.dataTransfer.items)
+        : [];
+      onDropFiles(files);
+      event.preventDefault();
+    };
+
+    const onDropCaught = (event: DragEvent) => {
+      onDrop(event).catch((e) => captureError(e));
+    };
+
+    document.addEventListener("dragenter", onDragEnter);
+    document.addEventListener("dragleave", onDragLeave);
+    document.addEventListener("drop", onDropCaught);
+
+    return () => {
+      document.removeEventListener("dragenter", onDragEnter);
+      document.removeEventListener("dragleave", onDragLeave);
+      document.removeEventListener("drop", onDropCaught);
+    };
+  }, [
+    setDragging,
+    checkUnsavedChanges,
+    handlers,
+    userTracking,
+    dialog,
+    setDialogState,
+  ]);
+
+  if (dialog && dialog.type !== "welcome") return null;
+
+  return dragging ? (
+    <StyledDropOverlay>
+      {converters.length > 0
+        ? translate("dropProjectInpOrModel")
+        : translate("dropProjectOrInp")}
+    </StyledDropOverlay>
+  ) : null;
+};
+
+export default Drop;

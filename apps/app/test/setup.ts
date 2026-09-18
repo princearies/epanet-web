@@ -1,0 +1,366 @@
+// This is the vi.'setupFilesAfterEnv' setup file
+// It's a good place to set globals, add global before/after hooks, etc
+//
+import Fs from "fs";
+import Path from "path";
+import { TextEncoder, TextDecoder } from "fastestsmallesttextencoderdecoder";
+import type { Either } from "purify-ts/Either";
+import { matcherHint } from "jest-matcher-utils";
+import { diff } from "jest-diff";
+import { Maybe } from "purify-ts/Maybe";
+import { expect } from "vitest";
+import "@testing-library/jest-dom";
+import { setWorkerForTest } from "@epanet-js/ejsdb";
+import { stubUserTracking } from "src/__helpers__/user-tracking";
+import { AuthMockProvider, useAuthMock } from "src/__helpers__/auth-mock";
+import { nullDbWorker } from "src/lib/db/__test-helpers__/null-db-worker";
+import { resetTraceWorkerForTest } from "src/lib/trace/get-worker";
+import { resetConnectivityTraceWorkerForTest } from "src/lib/network-review/connectivity-trace/get-worker";
+import { resetOrphanAssetsWorkerForTest } from "src/lib/network-review/orphan-assets/get-worker";
+import { resetCustomerPointsWorkerForTest } from "src/lib/customer-points/get-worker";
+import { resetCrossingPipesWorkerForTest } from "src/lib/network-review/crossing-pipes/get-worker";
+import { resetProximityAnomaliesWorkerForTest } from "src/lib/network-review/proximity-anomalies/get-worker";
+import { resetSpatialQueryWorkerForTest } from "src/map/mode-handlers/area-selection/get-worker";
+
+vi.mock("src/hooks/use-auth", () => ({
+  useAuth: useAuthMock,
+}));
+
+vi.mock("src/providers/auth-provider", () => ({
+  AuthProvider: AuthMockProvider,
+}));
+
+vi.mock("src/hooks/use-organization", () => ({
+  useOrganization: () => ({ organization: null }),
+}));
+
+vi.mock("src/hooks/use-organization-list", () => ({
+  useOrganizationList: () => ({ userMemberships: undefined }),
+}));
+
+vi.mock("src/infra/storage", async (importOriginal) => {
+  const original = await importOriginal<typeof import("src/infra/storage")>();
+  return {
+    ...original,
+    OPFSStorage: original.InMemoryStorage,
+  };
+});
+
+vi.stubGlobal(
+  "FileSystemFileHandle",
+  class FileSystemFileHandle {
+    createWritable() {}
+  },
+);
+
+beforeEach(async () => {
+  setWorkerForTest(nullDbWorker);
+  resetTraceWorkerForTest();
+  resetConnectivityTraceWorkerForTest();
+  resetOrphanAssetsWorkerForTest();
+  resetCustomerPointsWorkerForTest();
+  resetCrossingPipesWorkerForTest();
+  resetProximityAnomaliesWorkerForTest();
+  resetSpatialQueryWorkerForTest();
+  stubUserTracking();
+  // Reset shared in-memory storage between tests
+  const { InMemoryStorage } = await import("src/infra/storage");
+  InMemoryStorage.resetAll();
+});
+
+const passMessage = (expect: "Left" | "Right") => () =>
+  matcherHint(`.not.to${expect}`, "received", "") +
+  "\n\n" +
+  `Expected Either to be ${expect}`;
+
+const failMessage = (expect: "Left" | "Right") => () =>
+  matcherHint(`.toBe${expect}`, "received", "") +
+  "\n\n" +
+  `Expected Either to be ${expect}`;
+
+const failRight = (value: string) => () =>
+  matcherHint(".toEqualRight", "received", "") +
+  "\n\n" +
+  "Expected Either to be Right, received Left." +
+  "\n\n" +
+  value;
+
+expect.extend({
+  toBeRight(received: Either<unknown, unknown>) {
+    const pass = received.isRight();
+    return {
+      pass: pass,
+      message: pass ? passMessage("Right") : failMessage("Right"),
+    };
+  },
+  toBeNothing(received: Maybe<unknown>) {
+    const pass = received.isNothing();
+    return {
+      pass: pass,
+      message: pass ? () => "Was nothing" : () => "Expected Nothing, got Just",
+    };
+  },
+  toBeJust(received: Maybe<unknown>) {
+    const pass = received.isJust();
+    return {
+      pass: pass,
+      message: pass ? () => "Was just" : () => "Expected Just, got Nothing",
+    };
+  },
+  toBeLeft(received: Either<unknown, unknown>) {
+    const pass = received.isLeft();
+    return {
+      pass: pass,
+      message: pass ? passMessage("Left") : failMessage("Left"),
+    };
+  },
+  toEqualLeft(received: Either<unknown, unknown>, expected: unknown) {
+    const { equals, utils, expand } = this;
+    const options = {
+      comment: "Right value equality",
+      isNot: this.isNot,
+      promise: this.promise,
+    };
+
+    return received.caseOf({
+      Right(value) {
+        return {
+          pass: false,
+          message: failRight(utils.printReceived(value)),
+        };
+      },
+      Left(value) {
+        if (equals(value, expected)) {
+          return {
+            pass: true,
+            message: passMessage("Left"),
+          };
+        } else {
+          return {
+            pass: false,
+            message: () => {
+              const diffString = diff(expected, received, {
+                expand: !!expand,
+              });
+
+              return (
+                utils.matcherHint(
+                  "toEqualLeft",
+                  undefined,
+                  undefined,
+                  options,
+                ) +
+                "\n\n" +
+                (diffString && diffString.includes("- Expect")
+                  ? `Difference:\n\n${diffString}`
+                  : `Expected: ${utils.printExpected(expected)}\n` +
+                    `Received: ${utils.printReceived(received)}`)
+              );
+            },
+          };
+        }
+      },
+    });
+  },
+  toEqualRight(received: Either<unknown, unknown>, expected: unknown) {
+    const { equals, utils, expand } = this;
+    const options = {
+      comment: "Right value equality",
+      isNot: this.isNot,
+      promise: this.promise,
+    };
+
+    return received.caseOf({
+      Left(value) {
+        return {
+          pass: false,
+          message: failRight(utils.printReceived(value)),
+        };
+      },
+      Right(value) {
+        if (equals(value, expected)) {
+          return {
+            pass: true,
+            message: passMessage("Right"),
+          };
+        } else {
+          return {
+            pass: false,
+            message: () => {
+              const diffString = diff(expected, received, {
+                expand: !!expand,
+              });
+
+              return (
+                utils.matcherHint(
+                  "toEqualRight",
+                  undefined,
+                  undefined,
+                  options,
+                ) +
+                "\n\n" +
+                (diffString && diffString.includes("- Expect")
+                  ? `Difference:\n\n${diffString}`
+                  : `Expected: ${utils.printExpected(expected)}\n` +
+                    `Received: ${utils.printReceived(received)}`)
+              );
+            },
+          };
+        }
+      },
+    });
+  },
+});
+
+if (
+  typeof window !== "undefined" &&
+  typeof window.URL.createObjectURL === "undefined"
+) {
+  (window as any).URL.createObjectURL = () => {
+    // Do nothing
+    // Mock this function for mapbox-gl to work
+  };
+
+  (window as any).TextEncoder = TextEncoder;
+  (window as any).TextDecoder = TextDecoder;
+
+  (window as any).ResizeObserver = class ResizeObserver {
+    cb: any;
+    constructor(cb: any) {
+      this.cb = cb;
+    }
+    observe() {
+      // Call with contentRect that has a non-zero height for grid virtualization
+      // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+      this.cb([{ contentRect: { height: 300, width: 400 } }]);
+    }
+    unobserve() {}
+    disconnect() {}
+  };
+
+  window.HTMLElement.prototype.hasPointerCapture = vi.fn();
+  window.HTMLElement.prototype.scrollIntoView = vi.fn();
+  Object.defineProperty(window, "matchMedia", {
+    writable: true,
+    value: vi.fn().mockImplementation((query) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(), // Deprecated
+      removeListener: vi.fn(), // Deprecated
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    })),
+  });
+
+  window.Blob.prototype.text = function () {
+    const reader = new FileReader();
+
+    return new Promise((resolve) => {
+      reader.addEventListener("load", () => {
+        resolve(reader.result as string);
+      });
+      reader.readAsText(this);
+    });
+  };
+
+  window.File.prototype.arrayBuffer = function () {
+    const reader = new FileReader();
+
+    return new Promise((resolve) => {
+      reader.addEventListener("load", () => {
+        resolve(reader.result as ArrayBuffer);
+      });
+      reader.readAsArrayBuffer(this);
+    });
+  };
+
+  window.File.prototype.text = function () {
+    const reader = new FileReader();
+
+    return new Promise((resolve) => {
+      reader.addEventListener("load", () => {
+        resolve(reader.result as string);
+      });
+      reader.readAsText(this);
+    });
+  };
+
+  (window as any).DOMRect = {
+    fromRect: () => ({
+      top: 0,
+      left: 0,
+      bottom: 0,
+      right: 0,
+      width: 0,
+      height: 0,
+    }),
+  };
+
+  // jsdom performs no layout, so offsetWidth/offsetHeight are always 0.
+  // @tanstack/virtual-core reads them to size the scroll viewport (it used
+  // getBoundingClientRect before v3.17), which would otherwise virtualize
+  // every row away. Keep these in sync with the rect mock below.
+  Object.defineProperty(window.HTMLElement.prototype, "offsetWidth", {
+    configurable: true,
+    get: () => 300,
+  });
+  Object.defineProperty(window.HTMLElement.prototype, "offsetHeight", {
+    configurable: true,
+    get: () => 128,
+  });
+
+  // jsdom ships no scrolling at all, so this method is simply missing.
+  Element.prototype.scrollTo = vi.fn();
+
+  // Chart cursors, scroll-spy, the grid's scrollbar hit-test and Radix
+  // positioning all read this; jsdom would report zeros.
+  Element.prototype.getBoundingClientRect = vi.fn(() => ({
+    top: 0,
+    left: 0,
+    bottom: 128,
+    right: 300,
+    width: 300,
+    height: 128,
+    x: 0,
+    y: 0,
+    toJSON: () => {},
+  }));
+
+  (window as any).fetch = (url: string) => {
+    if (url === "/zip-lookup.json") {
+      return Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve(
+            JSON.parse(
+              Fs.readFileSync(
+                Path.join(__dirname, "../public/zip-lookup.json"),
+                "utf8",
+              ),
+            ),
+          ),
+      });
+    }
+
+    if (url.endsWith("/projections.json")) {
+      return Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve(
+            JSON.parse(
+              Fs.readFileSync(
+                Path.join(__dirname, "projections_fixture.json"),
+                "utf8",
+              ),
+            ),
+          ),
+      });
+    }
+
+    throw new Error("Unexpected fetch");
+  };
+}
+
+export {}; // so TS doesn't complain

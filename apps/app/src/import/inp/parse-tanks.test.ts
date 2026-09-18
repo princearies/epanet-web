@@ -1,0 +1,258 @@
+import { parseInp } from "./parse-inp";
+import { Asset, AssetsMap, Tank } from "src/hydraulic-model";
+
+describe("parse tanks", () => {
+  it("creates a tank from the tank data", () => {
+    const lat = 10;
+    const lng = -10;
+    const inp = `
+    [TANKS]
+    ;ID   Elev.  InitLvl  MinLvl  MaxLvl  Diam  MinVol  VolCurve  Overflow
+    ;---------------------------------------------------------------------
+    T1    100     15       5       25     120   14       *          YES
+
+    [COORDINATES]
+    T1\t${lng}\t${lat}
+    `;
+
+    const { hydraulicModel, issues } = parseInp(inp);
+
+    const tank = getByLabel(hydraulicModel.assets, "T1") as Tank;
+    expect(tank.id).not.toBeUndefined();
+    expect(tank.id).not.toEqual("T1");
+    expect(tank.type).toEqual("tank");
+    expect(tank.elevation).toEqual(100);
+    expect(tank.initialLevel).toEqual(15);
+    expect(tank.minLevel).toEqual(5);
+    expect(tank.maxLevel).toEqual(25);
+    expect(tank.diameter).toEqual(120);
+    expect(tank.minVolume).toEqual(14);
+    expect(tank.overflow).toEqual(true);
+    expect(tank.coordinates).toEqual([-10, 10]);
+    expect(issues).toBeNull();
+  });
+
+  it("tolerates references with different case", () => {
+    const lat = 10;
+    const lng = -10;
+    const inp = `
+    [TANKS]
+    ;ID   Elev.  InitLvl  MinLvl  MaxLvl  Diam  MinVol  VolCurve  Overflow
+    ;---------------------------------------------------------------------
+    T1    100     15       5       25     120   14       *          YES
+
+    [COORDINATES]
+    t1\t${lng}\t${lat}
+    `;
+
+    const { hydraulicModel, issues } = parseInp(inp);
+
+    const tank = getByLabel(hydraulicModel.assets, "T1") as Tank;
+    expect(tank.id).not.toBeUndefined();
+    expect(tank.id).not.toEqual("T1");
+    expect(tank.overflow).toEqual(true);
+    expect(tank.coordinates).toEqual([-10, 10]);
+    expect(issues).toBeNull();
+  });
+
+  it("stores volumeCurveId", () => {
+    const inp = `
+    [TANKS]
+    T1    100     15       5       25     120   0       VC1
+
+    [CURVES]
+    VC1\t0\t0
+    VC1\t10\t500
+
+    [COORDINATES]
+    T1\t10\t20
+    `;
+
+    const { hydraulicModel } = parseInp(inp);
+
+    const tank = getByLabel(hydraulicModel.assets, "T1") as Tank;
+    expect(tank.volumeCurveId).toBeDefined();
+    const curve = hydraulicModel.curves.get(tank.volumeCurveId!)!;
+    expect(curve.type).toBe("volume");
+  });
+
+  it("does not register tank curve when tank uses asterisk placeholder", () => {
+    const lat = 10;
+    const lng = -10;
+    const inp = `
+    [TANKS]
+    ;ID   Elev.  InitLvl  MinLvl  MaxLvl  Diam  MinVol  VolCurve  Overflow
+    ;---------------------------------------------------------------------
+    T1    100     15       5       25     120   14       *          YES
+
+    [COORDINATES]
+    T1\t${lng}\t${lat}
+    `;
+
+    const { hydraulicModel } = parseInp(inp);
+
+    const tank = getByLabel(hydraulicModel.assets, "T1") as Tank;
+    expect(tank.id).not.toBeUndefined();
+    expect(tank.type).toEqual("tank");
+    expect(tank.overflow).toEqual(true);
+    expect(tank.coordinates).toEqual([-10, 10]);
+    expect(tank.volumeCurveId).toBeUndefined();
+  });
+
+  it("sets overflow to false when tank overflow is NO", () => {
+    const lat = 10;
+    const lng = -10;
+    const inp = `
+    [TANKS]
+    ;ID   Elev.  InitLvl  MinLvl  MaxLvl  Diam  MinVol  VolCurve  Overflow
+    ;---------------------------------------------------------------------
+    T1    100     15       5       25     120   14       *          NO
+
+    [COORDINATES]
+    T1\t${lng}\t${lat}
+    `;
+
+    const { hydraulicModel } = parseInp(inp);
+
+    const tank = getByLabel(hydraulicModel.assets, "T1") as Tank;
+    expect(tank.overflow).toEqual(false);
+  });
+
+  it("defaults mixing model to mixed when no MIXING section", () => {
+    const inp = `
+    [TANKS]
+    T1    100     15       5       25     120   0
+
+    [COORDINATES]
+    T1\t10\t20
+    `;
+
+    const { hydraulicModel } = parseInp(inp);
+
+    const tank = getByLabel(hydraulicModel.assets, "T1") as Tank;
+    expect(tank.mixingModel).toEqual("mixed");
+    expect(tank.mixingFraction).toBeUndefined();
+  });
+
+  it("parses FIFO mixing model", () => {
+    const inp = `
+    [TANKS]
+    T1    100     15       5       25     120   0
+
+    [MIXING]
+    T1    FIFO
+
+    [COORDINATES]
+    T1\t10\t20
+    `;
+
+    const { hydraulicModel } = parseInp(inp);
+
+    const tank = getByLabel(hydraulicModel.assets, "T1") as Tank;
+    expect(tank.mixingModel).toEqual("fifo");
+  });
+
+  it("parses LIFO mixing model", () => {
+    const inp = `
+    [TANKS]
+    T1    100     15       5       25     120   0
+
+    [MIXING]
+    T1    LIFO
+
+    [COORDINATES]
+    T1\t10\t20
+    `;
+
+    const { hydraulicModel } = parseInp(inp);
+
+    const tank = getByLabel(hydraulicModel.assets, "T1") as Tank;
+    expect(tank.mixingModel).toEqual("lifo");
+  });
+
+  it("parses 2COMP mixing model with fraction", () => {
+    const inp = `
+    [TANKS]
+    T1    100     15       5       25     120   0
+
+    [MIXING]
+    T1    2COMP    0.3
+
+    [COORDINATES]
+    T1\t10\t20
+    `;
+
+    const { hydraulicModel } = parseInp(inp);
+
+    const tank = getByLabel(hydraulicModel.assets, "T1") as Tank;
+    expect(tank.mixingModel).toEqual("2comp");
+    expect(tank.mixingFraction).toEqual(0.3);
+  });
+
+  it("falls back to default mixing model when value is not a valid enum", () => {
+    const inp = `
+    [TANKS]
+    T1    100     15       5       25     120   0
+
+    [MIXING]
+    T1    NO
+
+    [COORDINATES]
+    T1\t10\t20
+    `;
+
+    const { hydraulicModel } = parseInp(inp);
+
+    const tank = getByLabel(hydraulicModel.assets, "T1") as Tank;
+    expect(tank.mixingModel).toEqual("mixed");
+  });
+
+  it("leaves min volume empty when omitted", () => {
+    const inp = `
+    [TANKS]
+    T1    100     15       5       25     120
+
+    [COORDINATES]
+    T1\t10\t20
+    `;
+
+    const { hydraulicModel } = parseInp(inp);
+
+    const tank = getByLabel(hydraulicModel.assets, "T1") as Tank;
+    expect(tank.minVolume).toBeUndefined();
+  });
+
+  it("leaves min volume undefined when omitted and null values are allowed", () => {
+    const inp = `
+    [TANKS]
+    T1    100     15       5       25     120
+
+    [COORDINATES]
+    T1\t10\t20
+    `;
+
+    const { hydraulicModel } = parseInp(inp);
+
+    const tank = getByLabel(hydraulicModel.assets, "T1") as Tank;
+    expect(tank.minVolume).toBeUndefined();
+  });
+
+  it("leaves mixing fraction undefined when no MIXING section and null values are allowed", () => {
+    const inp = `
+    [TANKS]
+    T1    100     15       5       25     120   0
+
+    [COORDINATES]
+    T1\t10\t20
+    `;
+
+    const { hydraulicModel } = parseInp(inp);
+
+    const tank = getByLabel(hydraulicModel.assets, "T1") as Tank;
+    expect(tank.mixingFraction).toBeUndefined();
+  });
+
+  const getByLabel = (assets: AssetsMap, label: string): Asset | undefined => {
+    return [...assets.values()].find((a) => a.label === label);
+  };
+});

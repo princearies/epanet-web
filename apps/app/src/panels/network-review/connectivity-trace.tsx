@@ -1,0 +1,329 @@
+import { useAtomValue } from "jotai";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Button } from "src/components/elements";
+import { useTranslate } from "src/hooks/use-translate";
+import { useZoomTo } from "src/hooks/use-zoom-to";
+import { useUserTracking } from "src/infra/user-tracking";
+import { WarningIcon } from "src/icons";
+import {
+  findConnectivityTrace,
+  SubNetwork,
+  unsuppliedSubNetworks,
+  CheckType,
+} from "src/lib/network-review";
+import { useCachedCheck } from "src/hooks/use-review-checks";
+import { USelection, useSelection } from "src/selection";
+import { stagingModelDerivedAtom } from "src/state/derived-branch-state";
+import { selectionAtom } from "src/state/selection";
+import { FixSubnetworkButton } from "./fixes/fix-subnetwork-button";
+import {
+  canDisableSubnetwork,
+  useFixSubnetwork,
+} from "./fixes/use-fix-subnetwork";
+import {
+  EmptyState,
+  LoadingState,
+  ToolDescription,
+  ToolHeader,
+  useCheckHeader,
+  useLoadingStatus,
+  VirtualizedIssuesList,
+} from "./common";
+import { Maybe } from "purify-ts/Maybe";
+
+export const ConnectivityTrace = ({ onGoBack }: { onGoBack: () => void }) => {
+  const userTracking = useUserTracking();
+  const { subnetworks, checkConnectivityTrace, isLoading, isReady } =
+    useCheckConnectivityTrace();
+  const selection = useAtomValue(selectionAtom);
+  const { clearSelection, setSelection, getSelectionIds } =
+    useSelection(selection);
+  const zoomTo = useZoomTo();
+  const [selectedSubnetworkId, setSelectedSubnetworkId] = useState<
+    number | null
+  >(null);
+
+  const lastIssuesCount = useRef(0);
+
+  useEffect(
+    function recomputeConnectivityTrace() {
+      const abortController = new AbortController();
+      void checkConnectivityTrace(abortController.signal);
+      return () => {
+        abortController.abort();
+      };
+    },
+    [checkConnectivityTrace],
+  );
+
+  const selectSubnetwork = useCallback(
+    (subnetwork: SubNetwork | null) => {
+      if (!subnetwork) {
+        setSelectedSubnetworkId(null);
+        clearSelection();
+        return;
+      }
+
+      setSelectedSubnetworkId(subnetwork.subnetworkId);
+
+      const allIds = [...subnetwork.nodeIds, ...subnetwork.linkIds];
+      setSelection(USelection.fromAssetIds(allIds));
+
+      if (subnetwork.bounds) {
+        zoomTo(Maybe.of(subnetwork.bounds));
+      }
+    },
+    [clearSelection, setSelection, zoomTo],
+  );
+
+  useEffect(() => {
+    const issuesCount = subnetworks.length;
+    if (lastIssuesCount.current !== issuesCount) {
+      lastIssuesCount.current = issuesCount;
+      userTracking.capture({
+        name: "networkReview.connectivityTrace.changed",
+        count: issuesCount,
+      });
+    }
+  }, [subnetworks, userTracking]);
+
+  useEffect(() => {
+    const selectedIds = getSelectionIds();
+    if (selectedIds.length === 0) setSelectedSubnetworkId(null);
+    const firstSelectedId = selectedIds[0];
+
+    const candidateSubNetwork = subnetworks.find(
+      (subNetwork) =>
+        subNetwork.linkIds.findIndex((linkId) => linkId === firstSelectedId) >=
+          0 ||
+        subNetwork.nodeIds.findIndex((nodeId) => nodeId === firstSelectedId) >=
+          0,
+    );
+
+    if (!candidateSubNetwork) {
+      setSelectedSubnetworkId(null);
+    } else {
+      const subNetworkId = candidateSubNetwork.subnetworkId;
+      setSelectedSubnetworkId((prev) =>
+        prev === subNetworkId ? prev : subNetworkId,
+      );
+    }
+  }, [subnetworks, getSelectionIds]);
+
+  const headerProps = useCheckHeader(
+    CheckType.connectivityTrace,
+    subnetworks.length,
+    onGoBack,
+  );
+
+  return (
+    <div className="absolute inset-0 flex flex-col">
+      <ToolHeader
+        {...headerProps}
+        autoFocus={subnetworks.length === 0 && !isLoading}
+      />
+      <div className="relative grow flex flex-col">
+        {isReady ? (
+          <>
+            {subnetworks.length > 0 ? (
+              <SubNetworksList
+                subNetworks={subnetworks}
+                onSelect={selectSubnetwork}
+                selectedSubNetwork={selectedSubnetworkId}
+                onGoBack={onGoBack}
+              />
+            ) : (
+              <>
+                <ToolDescription checkType={CheckType.connectivityTrace} />
+                <EmptyState checkType={CheckType.connectivityTrace} />
+              </>
+            )}
+            {isLoading && <LoadingState overlay />}
+          </>
+        ) : (
+          <>
+            <ToolDescription checkType={CheckType.connectivityTrace} />
+            <LoadingState />
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const getSubnetworkId = (subnetwork: SubNetwork) => subnetwork.subnetworkId;
+
+const SubNetworksList = ({
+  subNetworks,
+  onSelect,
+  selectedSubNetwork,
+  onGoBack,
+}: {
+  subNetworks: SubNetwork[];
+  onSelect: (issue: SubNetwork | null) => void;
+  selectedSubNetwork: number | null;
+  onGoBack: () => void;
+}) => {
+  const { fix } = useFixSubnetwork();
+
+  const fixSubnetwork = useCallback(
+    (subnetworkId: number) => {
+      const index = subNetworks.findIndex(
+        (candidate) => candidate.subnetworkId === subnetworkId,
+      );
+      if (index === -1) return;
+
+      fix(subNetworks[index]);
+    },
+    [subNetworks, fix],
+  );
+
+  return (
+    <VirtualizedIssuesList
+      items={subNetworks}
+      selectedItemId={selectedSubNetwork}
+      onSelect={onSelect}
+      getItemId={getSubnetworkId}
+      renderItem={(index, subnetwork, selectedId, onClick) => (
+        <SubnetworkItem
+          index={index + 1}
+          subnetwork={subnetwork}
+          selectedId={selectedId}
+          onClick={onClick}
+          showWarning={subnetwork.supplySourceCount === 0}
+        />
+      )}
+      renderItemAction={(subnetwork) =>
+        canDisableSubnetwork(subnetwork) ? (
+          <FixSubnetworkButton
+            onFix={() => fixSubnetwork(subnetwork.subnetworkId)}
+          />
+        ) : null
+      }
+      onItemAction={fixSubnetwork}
+      checkType={CheckType.connectivityTrace}
+      onGoBack={onGoBack}
+    />
+  );
+};
+
+const SubnetworkItem = ({
+  index,
+  subnetwork,
+  onClick,
+  selectedId,
+  showWarning,
+}: {
+  index: number;
+  subnetwork: SubNetwork;
+  onClick: (subnetwork: SubNetwork) => void;
+  selectedId: number | null;
+  showWarning: boolean;
+}) => {
+  const translate = useTranslate();
+  const isSelected = selectedId === subnetwork.subnetworkId;
+
+  const supplySourceText = translate(
+    "networkReview.connectivityTrace.supplySourceCount",
+    subnetwork.supplySourceCount,
+  );
+  const pipesText = translate(
+    "networkReview.connectivityTrace.pipesCount",
+    subnetwork.pipeCount,
+  );
+
+  return (
+    <Button
+      onClick={() => onClick(subnetwork)}
+      onMouseDown={(e) => e.preventDefault()}
+      variant={"quiet/list"}
+      aria-label={translate(
+        "networkReview.connectivityTrace.issueLabel",
+        String(index),
+        String(subnetwork.supplySourceCount),
+        String(subnetwork.linkIds.length),
+      )}
+      aria-selected={isSelected}
+      size="xxs"
+      tabIndex={-1}
+      className="group w-full hover:bg-transparent dark:hover:bg-transparent aria-selected:bg-transparent! aria-selected:hover:bg-transparent!"
+    >
+      <div className="flex flex-col items-start py-2 px-2 pr-0 text-size-base w-full text-left">
+        <div className="truncate">
+          {translate(
+            "networkReview.connectivityTrace.subnetwork",
+            String(index),
+          )}
+        </div>
+        <div className="text-subtle flex items-center gap-1 w-full">
+          {showWarning && (
+            <span className="shrink-0 text-orange-500 dark:text-orange-400">
+              <WarningIcon size={12} />
+            </span>
+          )}
+          <span className="truncate">
+            {supplySourceText} · {pipesText}
+          </span>
+        </div>
+      </div>
+    </Button>
+  );
+};
+
+const deferToAllowRender = () =>
+  new Promise((resolve) => setTimeout(resolve, 0));
+
+const useCheckConnectivityTrace = () => {
+  const [subnetworks, setSubnetworks] = useState<SubNetwork[]>([]);
+  const hydraulicModel = useAtomValue(stagingModelDerivedAtom);
+  const { read, write } = useCachedCheck(CheckType.connectivityTrace);
+  const { startLoading, finishLoading, isLoading } = useLoadingStatus();
+  const isReady = useRef(false);
+
+  const checkConnectivityTrace = useCallback(
+    async (signal?: AbortSignal) => {
+      const cached = read();
+      if (cached) {
+        setSubnetworks(cached);
+        finishLoading();
+        isReady.current = true;
+        return;
+      }
+
+      const modelVersion = hydraulicModel.version;
+      startLoading();
+      await deferToAllowRender();
+
+      if (signal?.aborted) return;
+
+      try {
+        const result = await findConnectivityTrace(
+          hydraulicModel,
+          "array",
+          signal,
+        );
+
+        if (!signal?.aborted) {
+          write(result, unsuppliedSubNetworks(result).length, modelVersion);
+          setSubnetworks(result);
+          finishLoading();
+          isReady.current = true;
+        }
+      } catch (error) {
+        if ((error as Error).name === "AbortError") {
+          return;
+        }
+        finishLoading();
+        throw error;
+      }
+    },
+    [hydraulicModel, startLoading, finishLoading, read, write],
+  );
+
+  return {
+    checkConnectivityTrace,
+    subnetworks,
+    isLoading,
+    isReady: isReady.current,
+  };
+};

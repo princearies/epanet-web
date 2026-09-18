@@ -1,0 +1,19 @@
+export { runSimulation, cancelSimulation } from "./epanet/main";
+export { willRequireLsx } from "./build-inp";
+export type { SimulationProgress, ProgressCallback } from "./epanet/worker";
+export { EPSResultsReader } from "./epanet/eps-results-reader";
+export type { SimulationIds } from "./epanet/eps-results-reader";
+export { SimulationMetadata } from "./epanet/simulation-metadata";
+export type {
+  PipeSimulation,
+  ValveSimulation,
+  PumpSimulation,
+  JunctionSimulation,
+  TankSimulation,
+  ResultsReader,
+  SimulationProperty,
+} from "@epanet-js/simulation";
+export {
+  simulationProperties,
+  isSimulationProperty,
+} from "@epanet-js/simulation";

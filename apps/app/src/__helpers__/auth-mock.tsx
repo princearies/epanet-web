@@ -1,0 +1,74 @@
+import { nanoid } from "nanoid";
+import { createContext, useContext } from "react";
+import { User, nullUser } from "src/auth-types";
+import { UseAuthHook } from "src/hooks/use-auth";
+
+const AuthMockContext = createContext<{
+  user: User;
+  isSignedIn: boolean;
+  signOut: () => Promise<void>;
+  reload: () => Promise<void>;
+  isLoaded: boolean;
+}>({
+  user: nullUser,
+  isSignedIn: false,
+  signOut: async () => {},
+  reload: async () => {},
+  isLoaded: true,
+});
+
+export const aUser = (attributes: Partial<User> = {}): User => {
+  const defaults: User = {
+    id: nanoid(),
+    email: "test@example.org",
+    firstName: "John",
+    lastName: "Doe",
+    plan: "free",
+    trialActivatedAt: null,
+    trialEndsAt: null,
+    hasUsedTrial: false,
+    subscriptionStatus: null,
+  };
+  return { ...defaults, ...attributes };
+};
+
+export const aGuestUser = () => ({ ...nullUser });
+
+export const AuthMockProvider = ({
+  children,
+  user = aUser(),
+  isSignedIn = true,
+  isLoaded = true,
+  signOut = vi.fn().mockResolvedValue(undefined),
+  reload = vi.fn().mockResolvedValue(undefined),
+}: {
+  children: React.ReactNode;
+  user?: User;
+  isSignedIn?: boolean;
+  signOut?: () => Promise<void>;
+  reload?: () => Promise<void>;
+  isLoaded?: boolean;
+}) => {
+  return (
+    <AuthMockContext.Provider
+      value={{ isLoaded, user, isSignedIn, signOut, reload }}
+    >
+      {children}
+    </AuthMockContext.Provider>
+  );
+};
+
+export const useAuthMock: UseAuthHook = () => {
+  const { isSignedIn, user, signOut, reload, isLoaded } =
+    useContext(AuthMockContext);
+
+  return {
+    isSignedIn,
+    user,
+    userId: user.id,
+    signOut,
+    isLoaded,
+    reload,
+    getToken: () => Promise.resolve(isSignedIn ? "session-token" : null),
+  };
+};

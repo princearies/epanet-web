@@ -1,0 +1,244 @@
+import {
+  useMemo,
+  useCallback,
+  forwardRef,
+  useRef,
+  useImperativeHandle,
+} from "react";
+import {
+  DataGrid,
+  type DataGridRef,
+  type GridColumn,
+  type GridSelection,
+  type RowAction,
+  floatColumn,
+  textColumn,
+} from "src/components/data-grid";
+import { PatternMultipliers } from "src/hydraulic-model";
+import { useTranslate } from "src/hooks/use-translate";
+import { DeleteIcon, AddIcon } from "src/icons";
+
+type PatternRow = {
+  timestep: string;
+  multiplier: number;
+};
+
+type PatternTableProps = {
+  pattern: PatternMultipliers;
+  patternTimestepSeconds: number;
+  onChange: (pattern: PatternMultipliers) => void;
+  onSelectionChange?: (selection: GridSelection | null) => void;
+  readOnly?: boolean;
+};
+
+export type PatternTableRef = DataGridRef;
+
+const DEFAULT_MULTIPLIER = 1.0;
+
+function formatTimestepTime(
+  timestepIndex: number,
+  intervalSeconds: number,
+): string {
+  const totalSeconds = timestepIndex * intervalSeconds;
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+const toRows = (
+  pattern: PatternMultipliers,
+  patternTimestepSeconds: number,
+): PatternRow[] => {
+  if (pattern.length === 0) {
+    return [
+      {
+        timestep: formatTimestepTime(0, patternTimestepSeconds),
+        multiplier: DEFAULT_MULTIPLIER,
+      },
+    ];
+  }
+  return pattern.map((multiplier, index) => ({
+    timestep: formatTimestepTime(index, patternTimestepSeconds),
+    multiplier,
+  }));
+};
+
+const fromRows = (rows: PatternRow[]): PatternMultipliers => {
+  return rows.map((row) => row.multiplier);
+};
+
+export const PatternTable = forwardRef<DataGridRef, PatternTableProps>(
+  function PatternTable(
+    {
+      pattern,
+      patternTimestepSeconds,
+      onChange,
+      onSelectionChange,
+      readOnly = false,
+    },
+    ref,
+  ) {
+    const translate = useTranslate();
+    const gridRef = useRef<DataGridRef>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
+
+    useImperativeHandle(ref, () => gridRef.current!, []);
+
+    const rowData = useMemo(
+      () => toRows(pattern, patternTimestepSeconds),
+      [pattern, patternTimestepSeconds],
+    );
+
+    const recalculateTimesteps = useCallback(
+      (rows: PatternRow[]): PatternRow[] =>
+        rows.map((row, idx) => ({
+          ...row,
+          timestep: formatTimestepTime(idx, patternTimestepSeconds),
+        })),
+      [patternTimestepSeconds],
+    );
+
+    const handleDeleteRow = useCallback(
+      (rowIndex: number) => {
+        if (rowData.length === 1) {
+          onChange([DEFAULT_MULTIPLIER]);
+        } else {
+          const newRows = rowData.filter((_, i) => i !== rowIndex);
+          onChange(fromRows(recalculateTimesteps(newRows)));
+        }
+      },
+      [rowData, onChange, recalculateTimesteps],
+    );
+
+    const selectRow = useCallback((rowIndex: number) => {
+      gridRef.current?.selectCells({ rowIndex });
+    }, []);
+
+    const handleInsertRowAbove = useCallback(
+      (rowIndex: number) => {
+        const newRow: PatternRow = {
+          timestep: "",
+          multiplier: DEFAULT_MULTIPLIER,
+        };
+        const newRows = [
+          ...rowData.slice(0, rowIndex),
+          newRow,
+          ...rowData.slice(rowIndex),
+        ];
+        onChange(fromRows(recalculateTimesteps(newRows)));
+        selectRow(rowIndex);
+      },
+      [rowData, onChange, recalculateTimesteps, selectRow],
+    );
+
+    const handleInsertRowBelow = useCallback(
+      (rowIndex: number) => {
+        const newRow: PatternRow = {
+          timestep: "",
+          multiplier: DEFAULT_MULTIPLIER,
+        };
+        const newRows = [
+          ...rowData.slice(0, rowIndex + 1),
+          newRow,
+          ...rowData.slice(rowIndex + 1),
+        ];
+        onChange(fromRows(recalculateTimesteps(newRows)));
+        selectRow(rowIndex + 1);
+      },
+      [rowData, onChange, recalculateTimesteps, selectRow],
+    );
+
+    const rowActions: RowAction[] = useMemo(
+      () => [
+        {
+          label: translate("delete"),
+          icon: <DeleteIcon size="sm" />,
+          variant: "destructive" as const,
+          onSelect: handleDeleteRow,
+          disabled: () => rowData.length <= 1,
+        },
+        {
+          label: translate("insertRowAbove"),
+          icon: <AddIcon size="sm" />,
+          onSelect: handleInsertRowAbove,
+        },
+        {
+          label: translate("insertRowBelow"),
+          icon: <AddIcon size="sm" />,
+          onSelect: handleInsertRowBelow,
+        },
+      ],
+      [
+        translate,
+        handleDeleteRow,
+        handleInsertRowAbove,
+        handleInsertRowBelow,
+        rowData.length,
+      ],
+    );
+
+    const columns: GridColumn<PatternRow>[] = useMemo(
+      () => [
+        textColumn("timestep", {
+          header: translate("timestep"),
+          size: 82,
+          isReadOnly: true,
+        }),
+        floatColumn("multiplier", {
+          header: translate("multiplier"),
+          size: 82,
+          emptyValue: 0,
+        }),
+      ],
+      [translate],
+    );
+
+    const createRow = useCallback(
+      (): PatternRow => ({
+        timestep: formatTimestepTime(rowData.length, patternTimestepSeconds),
+        multiplier: DEFAULT_MULTIPLIER,
+      }),
+      [rowData.length, patternTimestepSeconds],
+    );
+
+    const handleChange = useCallback(
+      (newRows: PatternRow[]) => {
+        if (newRows.length === 0) {
+          onChange([DEFAULT_MULTIPLIER]);
+        } else {
+          onChange(fromRows(recalculateTimesteps(newRows)));
+        }
+      },
+      [onChange, recalculateTimesteps],
+    );
+
+    const handleDelete = useCallback(
+      (rowsToDelete: PatternRow[]) => {
+        const toRemove = new Set(rowsToDelete);
+        handleChange(rowData.filter((row) => !toRemove.has(row)));
+      },
+      [handleChange, rowData],
+    );
+
+    const sharedProps = {
+      data: rowData,
+      columns,
+      onChange: handleChange,
+      onDelete: handleDelete,
+      createRow,
+      rowActions,
+      addRowLabel: translate("addTimestep"),
+      gutterColumn: "numbered" as const,
+      onSelectionChange,
+      variant: "spreadsheet" as const,
+      readOnly,
+      autoAddNewRows: true,
+    };
+
+    return (
+      <div ref={containerRef} className="h-full">
+        <DataGrid<PatternRow> ref={gridRef} {...sharedProps} />
+      </div>
+    );
+  },
+);

@@ -1,0 +1,272 @@
+import { useCallback, useState, type ReactNode } from "react";
+import clsx from "clsx";
+import {
+  Button,
+  DefaultErrorBoundary,
+  Loading,
+  StyledDialogContent,
+  StyledDialogOverlay,
+} from "src/components/elements";
+import { useTranslate } from "src/hooks/use-translate";
+
+import * as Dialog from "@radix-ui/react-dialog";
+import { useSetAtom } from "jotai";
+import { dialogAtom } from "src/state/dialog";
+import { CloseIcon, RefreshIcon } from "src/icons";
+import { SelectorPortalContainer } from "@epanet-js/ui-kit";
+
+export const useDialogState = () => {
+  const setDialogState = useSetAtom(dialogAtom);
+
+  const closeDialog = useCallback(() => {
+    setDialogState(null);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("dialog");
+
+    window.history.replaceState({}, "", url);
+  }, [setDialogState]);
+
+  return { closeDialog };
+};
+
+export const LoadingDialog = () => {
+  const { closeDialog } = useDialogState();
+  return (
+    <BaseDialog size="xs" isOpen={true} onClose={closeDialog}>
+      <Loading />
+    </BaseDialog>
+  );
+};
+
+export const DialogCloseX = () => {
+  return (
+    <Dialog.Close
+      aria-label="Close"
+      className="text-subtle shrink-0
+                  focus:bg-base-hover
+                  hover:text-default"
+    >
+      <CloseIcon />
+    </Dialog.Close>
+  );
+};
+
+export function DialogHeader({
+  title,
+  children,
+  badge,
+}: {
+  title?: string;
+  children?: ReactNode;
+  badge?: ReactNode;
+}) {
+  return (
+    <div
+      className="
+        flex items-center gap-x-2
+        px-4 py-3
+        text-base
+        text-default
+        border-b
+      "
+    >
+      {children && children}
+      {title && (
+        <div className="flex items-center gap-3 flex-auto min-w-0">
+          <Dialog.Title className="text-md font-semibold text-default wrap-break-word sm:truncate">
+            {title}
+          </Dialog.Title>
+          {badge && badge}
+        </div>
+      )}
+      <div className="relative top-1">
+        <DialogCloseX />
+      </div>
+    </div>
+  );
+}
+
+interface BaseDialogProps {
+  title?: string;
+  size?: "xs" | "sm" | "md" | "lg" | "xl" | "xxl" | "fullscreen" | "auto";
+  height?: "md" | "lg" | "xl" | "xxl";
+  isOpen: boolean;
+  onClose: () => void;
+  children: React.ReactNode;
+  footer?: React.ReactNode;
+  badge?: React.ReactNode;
+  preventClose?: boolean;
+}
+
+export const BaseDialog = ({
+  title,
+  size = "auto",
+  height,
+  isOpen,
+  onClose,
+  children,
+  footer,
+  badge,
+  preventClose = false,
+}: BaseDialogProps) => {
+  const [contentEl, setContentEl] = useState<HTMLElement | null>(null);
+
+  return (
+    <Dialog.Root
+      open={isOpen}
+      onOpenChange={(open) => !open && !preventClose && onClose()}
+    >
+      <Dialog.Portal>
+        <StyledDialogOverlay />
+        <div className="fixed inset-0 z-40 flex items-center justify-center p-4">
+          <StyledDialogContent
+            ref={setContentEl}
+            size={size}
+            height={height}
+            onOpenAutoFocus={(e) => e.preventDefault()}
+            onEscapeKeyDown={
+              preventClose ? (e) => e.preventDefault() : undefined
+            }
+            onPointerDownOutside={(e) => {
+              const target = e.detail.originalEvent
+                .target as HTMLElement | null;
+              if (target?.closest?.("[data-notification]")) {
+                e.preventDefault();
+              }
+            }}
+            aria-describedby={undefined}
+          >
+            <SelectorPortalContainer container={contentEl}>
+              <DefaultErrorBoundary>
+                <div className="modal-container flex flex-col flex-nowrap flex-1 min-h-0">
+                  {!title && <Dialog.Title className="sr-only" />}
+                  {title && <DialogHeader title={title} badge={badge} />}
+                  <div className="modal-content flex flex-col flex-1 overflow-y-auto min-h-0">
+                    {children}
+                  </div>
+                  {footer && <DialogFooter>{footer}</DialogFooter>}
+                </div>
+              </DefaultErrorBoundary>
+            </SelectorPortalContainer>
+          </StyledDialogContent>
+        </div>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+};
+
+export const AckDialogAction = ({
+  label,
+  onAck,
+}: {
+  label?: string;
+  onAck?: () => void;
+}) => {
+  const translate = useTranslate();
+  return (
+    <div
+      className={clsx(
+        "relative",
+        "px-4 py-3 border-t",
+        "flex flex-col sm:items-center sm:flex-row-reverse space-y-2 sm:space-y-0 sm:gap-x-3",
+      )}
+    >
+      <Button autoFocus={true} type="button" onClick={onAck}>
+        {label ? label : translate("dialog.cancel")}
+      </Button>
+    </div>
+  );
+};
+
+export const DialogFooter = ({ children }: { children: ReactNode }) => {
+  return children;
+};
+
+export function SimpleDialogActions({
+  action,
+  onAction,
+  onClose,
+  fullWidthSubmit = false,
+  autoFocusSubmit = true,
+  secondary,
+  tertiary,
+  isDisabled = false,
+  isSubmitting = false,
+  actionVariant = "primary",
+}: {
+  action?: string;
+  onAction?: () => void;
+  autoFocusSubmit?: boolean;
+  onClose?: () => void;
+  fullWidthSubmit?: boolean;
+  secondary?: {
+    action: string;
+    onClick: () => void;
+  };
+  tertiary?: {
+    action: string;
+    onClick: () => void;
+    variant?: "default" | "danger";
+  };
+  isDisabled?: boolean;
+  isSubmitting?: boolean;
+  actionVariant?: "primary" | "danger";
+}) {
+  const translate = useTranslate();
+  return (
+    <footer
+      className={clsx(
+        "relative",
+        fullWidthSubmit
+          ? "flex items-stretch justify-stretch"
+          : `flex flex-col sm:items-center sm:flex-row-reverse gap-3 px-4 py-3 border-t`,
+      )}
+    >
+      {action ? (
+        <Button
+          type={onAction ? "button" : "submit"}
+          onClick={onAction}
+          disabled={isSubmitting || isDisabled}
+          variant={actionVariant}
+          autoFocus={autoFocusSubmit}
+          size={fullWidthSubmit ? "full-width" : "sm"}
+        >
+          {action}
+        </Button>
+      ) : null}
+      {secondary ? (
+        <Button
+          type="button"
+          disabled={isSubmitting}
+          variant="default"
+          onClick={secondary.onClick}
+        >
+          {secondary.action}
+        </Button>
+      ) : null}
+      {tertiary ? (
+        <Button
+          type="button"
+          disabled={isSubmitting}
+          variant={tertiary.variant ?? "default"}
+          className={tertiary.variant === "danger" ? "sm:mr-auto" : undefined}
+          onClick={tertiary.onClick}
+        >
+          {tertiary.action}
+        </Button>
+      ) : null}
+      {onClose ? (
+        <Button type="button" onClick={onClose}>
+          {translate(action || secondary ? "dialog.cancel" : "dialog.close")}
+        </Button>
+      ) : null}
+      <RefreshIcon
+        className={clsx(
+          "animate-spin transition-opacity",
+          isSubmitting ? "opacity-50" : "hidden",
+          fullWidthSubmit && "absolute top-8 right-2.5 text-white",
+        )}
+      />
+    </footer>
+  );
+}

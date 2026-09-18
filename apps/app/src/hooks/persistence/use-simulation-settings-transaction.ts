@@ -1,0 +1,44 @@
+import { useCallback } from "react";
+import { useSetAtom } from "jotai";
+import { nanoid } from "nanoid";
+import type { SimulationSettings } from "src/simulation/simulation-settings";
+import { simulationSettingsDerivedAtom } from "src/state/derived-branch-state";
+import { projectDataVersionAtom } from "src/state/project-revision";
+import { dialogAtom } from "src/state/dialog";
+import {
+  setAllSimulationSettings,
+  serializeSimulationSettings,
+} from "src/lib/db";
+import { captureError } from "src/infra/error-tracking";
+import { writeQueue } from "src/lib/persistence/write-queue";
+import { useWriteFailureHandler } from "src/hooks/persistence/use-write-failure-handler";
+
+export const useSimulationSettingsTransaction = () => {
+  const setSettings = useSetAtom(simulationSettingsDerivedAtom);
+  const setProjectDataVersion = useSetAtom(projectDataVersionAtom);
+  const setDialog = useSetAtom(dialogAtom);
+  const onWriteFailure = useWriteFailureHandler();
+
+  const transact = useCallback(
+    (next: SimulationSettings): boolean => {
+      let data: string;
+      try {
+        data = serializeSimulationSettings(next);
+      } catch (error) {
+        captureError(error instanceof Error ? error : new Error(String(error)));
+        setDialog({ type: "changeNotApplied" });
+        return false;
+      }
+
+      setSettings(next);
+      setProjectDataVersion(nanoid());
+
+      writeQueue.enqueue(() => setAllSimulationSettings(data), onWriteFailure);
+
+      return true;
+    },
+    [setSettings, setProjectDataVersion, setDialog, onWriteFailure],
+  );
+
+  return { transact };
+};

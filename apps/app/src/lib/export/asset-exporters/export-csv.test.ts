@@ -1,0 +1,384 @@
+import { HydraulicModelBuilder } from "src/__helpers__/hydraulic-model-builder";
+import { ResultsReader } from "src/simulation";
+import { ExportedFile } from "../types";
+import { exportCsv } from "./export-csv";
+import { WGS84 } from "@epanet-js/projections";
+import { COORDINATE_DECIMAL_PLACES } from "../constants";
+
+const translate = (key: string) => key;
+
+describe("export-csv", () => {
+  it("returns no files for an empty model", () => {
+    const model = HydraulicModelBuilder.empty();
+    const files = exportCsv(model, WGS84, translate);
+
+    expect(files).toHaveLength(0);
+  });
+
+  describe("pipe roughness inferred from the pipe library", () => {
+    const modelWithMaterial = (roughness: number | null, material: string) =>
+      HydraulicModelBuilder.with()
+        .aPipe(1, { label: "P1", roughness, material })
+        .aPipeMaterial({
+          label: "Cast Iron",
+          entries: [{ age: 0, roughness: 120 }],
+        })
+        .build();
+
+    const roughnessOf = async (
+      model: ReturnType<HydraulicModelBuilder["build"]>,
+    ) => {
+      const files = exportCsv(model, WGS84, translate);
+      const lines = await readCsv(findFile(files, "pipes.csv"));
+      return parseCsvRows(lines)[0].roughness;
+    };
+
+    it("writes the inferred value for a pipe without one", async () => {
+      expect(await roughnessOf(modelWithMaterial(null, "Cast Iron"))).toBe(
+        "120",
+      );
+    });
+
+    it("writes the value stored on the pipe", async () => {
+      expect(await roughnessOf(modelWithMaterial(90, "Cast Iron"))).toBe("90");
+    });
+
+    it("leaves the cell empty when nothing can be inferred", async () => {
+      expect(await roughnessOf(modelWithMaterial(null, "PVC"))).toBe("");
+    });
+  });
+
+  it("returns one file per non-empty asset type with correct metadata", () => {
+    const model = HydraulicModelBuilder.with()
+      .aJunction(1, { label: "J1" })
+      .build();
+    const files = exportCsv(model, WGS84, translate);
+
+    expect(files).toHaveLength(1);
+    expect(files[0].fileName).toBe("junctions.csv");
+    expect(files[0].extensions).toEqual([".csv"]);
+    expect(files[0].mimeTypes).toEqual(["text/csv"]);
+    expect(files[0].description).toBe("CSV File");
+  });
+
+  it("uses asset properties as headers and values as data rows", async () => {
+    const model = HydraulicModelBuilder.with()
+      .aJunction(1, { label: "J1", elevation: 42 })
+      .build();
+    const files = exportCsv(model, WGS84, translate);
+
+    const lines = await readCsv(findFile(files, "junctions.csv"));
+    const headers = lines[0].split(",").filter(Boolean);
+    const [row] = parseCsvRows(lines);
+
+    expect(headers).toContain("label");
+    expect(headers).toContain("elevation");
+    expect(headers).toContain("type");
+    expect(headers.some((h) => h.startsWith("sim_"))).toBe(false);
+    expect(row.label).toBe("J1");
+    expect(row.type).toBe("junction");
+    expect(row.elevation).toBe("42");
+  });
+
+  it("generates separate CSV files per asset type", async () => {
+    const model = HydraulicModelBuilder.with()
+      .aJunction(1, { label: "J1" })
+      .aPipe(2, { startNodeId: 1 })
+      .build();
+    const files = exportCsv(model, WGS84, translate);
+
+    const junctionLines = await readCsv(findFile(files, "junctions.csv"));
+    const pipeLines = await readCsv(findFile(files, "pipes.csv"));
+
+    expect(junctionLines).toHaveLength(2);
+    expect(pipeLines).toHaveLength(2);
+  });
+
+  it("adds marked simulation columns from resultsReader when includeSimulationResults is true", async () => {
+    const model = HydraulicModelBuilder.with().aJunction(1).build();
+    const pressure = 42;
+    const demand = 10;
+    const resultsReader = mockResultsReader(pressure, demand);
+
+    const files = exportCsv(model, WGS84, translate, {
+      includeSimulationResults: true,
+      resultsReader,
+    });
+    const lines = await readCsv(findFile(files, "junctions.csv"));
+    const [row] = parseCsvRows(lines);
+
+    expect(row["pressure (simulation)"]).toBe("42");
+    expect(row["demand (simulation)"]).toBe("10");
+  });
+
+  it("exports customer points with all connection columns", async () => {
+    const model = HydraulicModelBuilder.with()
+      .aJunction(1, { label: "J1" })
+      .aPipe(2, { startNodeId: 1, label: "P1" })
+      .aCustomerPoint(10, {
+        label: "CP1",
+        coordinates: [1.1234, 2.5678],
+        connection: { pipeId: 2, junctionId: 1 },
+      })
+      .build();
+    const files = exportCsv(model, WGS84, translate);
+
+    const lines = await readCsv(findFile(files, "customer-points.csv"));
+    const headers = lines[0].split(",").filter(Boolean);
+    const [row] = parseCsvRows(lines);
+
+    expect(headers).toEqual([
+      "label",
+      "positionX",
+      "positionY",
+      "junction",
+      "pipe",
+      "connectionX",
+      "connectionY",
+    ]);
+    expect(row.label).toBe("CP1");
+    expect(row.positionX).toBe((1.1234).toFixed(COORDINATE_DECIMAL_PLACES));
+    expect(row.positionY).toBe((2.5678).toFixed(COORDINATE_DECIMAL_PLACES));
+    expect(row.junction).toBe("J1");
+    expect(row.pipe).toBe("P1");
+    expect(row.connectionX).toBe((1.1234).toFixed(COORDINATE_DECIMAL_PLACES));
+    expect(row.connectionY).toBe((2.5678).toFixed(COORDINATE_DECIMAL_PLACES));
+  });
+
+  it(`formats coordinate columns with ${COORDINATE_DECIMAL_PLACES} decimal places`, async () => {
+    const model = HydraulicModelBuilder.with()
+      .aJunction(1, { coordinates: [1.123456789, 2.987654321] })
+      .aPipe(2, { startNodeId: 1, label: "P1" })
+      .aCustomerPoint(10, {
+        label: "CP1",
+        coordinates: [3.111111111, 4.999999999],
+        connection: { pipeId: 2, junctionId: 1 },
+      })
+      .build();
+    const files = exportCsv(model, WGS84, translate);
+
+    const junctionLines = await readCsv(findFile(files, "junctions.csv"));
+    const [jRow] = parseCsvRows(junctionLines);
+    expect(jRow.positionX).toBe(
+      (1.123456789).toFixed(COORDINATE_DECIMAL_PLACES),
+    );
+    expect(jRow.positionY).toBe(
+      (2.987654321).toFixed(COORDINATE_DECIMAL_PLACES),
+    );
+
+    const cpLines = await readCsv(findFile(files, "customer-points.csv"));
+    const [cpRow] = parseCsvRows(cpLines);
+    expect(cpRow.positionX).toBe(
+      (3.111111111).toFixed(COORDINATE_DECIMAL_PLACES),
+    );
+    expect(cpRow.positionY).toBe(
+      (4.999999999).toFixed(COORDINATE_DECIMAL_PLACES),
+    );
+    expect(cpRow.connectionX).toBe(
+      (3.111111111).toFixed(COORDINATE_DECIMAL_PLACES),
+    );
+    expect(cpRow.connectionY).toBe(
+      (4.999999999).toFixed(COORDINATE_DECIMAL_PLACES),
+    );
+  });
+
+  it("exports customer points with empty connection when unconnected", async () => {
+    const model = HydraulicModelBuilder.with()
+      .aCustomerPoint(10, { label: "CP1", coordinates: [0, 0] })
+      .build();
+    const files = exportCsv(model, WGS84, translate);
+
+    const lines = await readCsv(findFile(files, "customer-points.csv"));
+    const [row] = parseCsvRows(lines);
+
+    expect(row.junction).toBe("");
+    expect(row.pipe).toBe("");
+  });
+
+  it("transforms coordinates using the given projection", async () => {
+    const xyGrid = {
+      type: "xy-grid" as const,
+      id: "test",
+      name: "Test XY Grid",
+      centroid: [0, 0] as [number, number],
+      scale: 1000,
+    };
+    const IDS = { J1: 1, CP1: 2, P1: 3 } as const;
+    const model = HydraulicModelBuilder.with()
+      .aJunction(IDS.J1, { coordinates: [1, 0] })
+      .aPipe(IDS.P1, { startNodeId: IDS.J1 })
+      .aCustomerPoint(IDS.CP1, {
+        coordinates: [1, 0],
+        connection: { pipeId: IDS.P1, junctionId: IDS.J1 },
+      })
+      .build();
+
+    const files = exportCsv(model, xyGrid, translate);
+
+    const junctionLines = await readCsv(findFile(files, "junctions.csv"));
+    const [jRow] = parseCsvRows(junctionLines);
+    expect(jRow.positionX).not.toBe("1.0000");
+
+    const cpLines = await readCsv(findFile(files, "customer-points.csv"));
+    const [cpRow] = parseCsvRows(cpLines);
+    expect(cpRow.positionX).not.toBe("1.0000");
+    expect(cpRow.connectionX).not.toBe("1.0000");
+  });
+
+  it("exports EPANET defaults for unmapped optional fields, blank for required nulls", async () => {
+    const model = HydraulicModelBuilder.with()
+      .aPipe(1, { label: "P1", diameter: null })
+      .build();
+    const pipe = model.assets.get(1)!;
+    pipe.setProperty("minorLoss", undefined);
+
+    const files = exportCsv(model, WGS84, translate);
+    const lines = await readCsv(findFile(files, "pipes.csv"));
+    const [row] = parseCsvRows(lines);
+
+    expect(row.minorLoss).toBe("0");
+    expect(row.diameter).toBe("");
+  });
+
+  it("omits the length column for valves and pumps but keeps it for pipes", async () => {
+    const model = HydraulicModelBuilder.with()
+      .aJunction(1)
+      .aJunction(2)
+      .aPipe(3, { startNodeId: 1, endNodeId: 2 })
+      .aValve(4, { startNodeId: 1, endNodeId: 2 })
+      .aPump(5, { startNodeId: 1, endNodeId: 2 })
+      .build();
+    const files = exportCsv(model, WGS84, translate);
+
+    const headerOf = async (name: string) =>
+      (await readCsv(findFile(files, name)))[0].split(",");
+
+    expect(await headerOf("pipes.csv")).toContain("length");
+    expect(await headerOf("valves.csv")).not.toContain("length");
+    expect(await headerOf("pumps.csv")).not.toContain("length");
+  });
+
+  it("only exports selected assets when selectedAssets is non-empty", async () => {
+    const model = HydraulicModelBuilder.with()
+      .aJunction(1, { label: "J1" })
+      .aJunction(2, { label: "J2" })
+      .build();
+    const files = exportCsv(model, WGS84, translate, {
+      assetIdsFilter: new Set([1]),
+    });
+
+    const lines = await readCsv(findFile(files, "junctions.csv"));
+    const rows = parseCsvRows(lines);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].label).toBe("J1");
+  });
+
+  it("localizes headers", async () => {
+    const model = HydraulicModelBuilder.with()
+      .aJunction(1, { label: "J1", elevation: 42 })
+      .build();
+    const resultsReader = mockResultsReader(42, 10);
+
+    const files = exportCsv(model, WGS84, translateStub, {
+      includeSimulationResults: true,
+      resultsReader,
+    });
+    const lines = await readCsv(findFile(files, "junctions.csv"));
+    const headers = lines[0].split(",").filter(Boolean);
+
+    expect(headers).toContain("Elevación");
+    expect(headers).toContain("Presión (Simulación)");
+    expect(headers).not.toContain("elevation");
+    expect(headers).not.toContain("sim_pressure");
+  });
+
+  it("uses custom attribute labels as headers", async () => {
+    const model = HydraulicModelBuilder.with()
+      .aCustomAttribute("junction", {
+        id: "custom-1",
+        label: "Zone",
+        type: "text",
+      })
+      .aJunction(1, { label: "J1" })
+      .build();
+    model.assets.get(1)!.setProperty("custom-1", "north");
+
+    const files = exportCsv(model, WGS84, translate);
+    const lines = await readCsv(findFile(files, "junctions.csv"));
+    const headers = lines[0].split(",").filter(Boolean);
+    const [row] = parseCsvRows(lines);
+
+    expect(headers).toContain("Zone");
+    expect(headers).not.toContain("custom-1");
+    expect(row.Zone).toBe("north");
+  });
+
+  it("quotes localized headers containing commas", async () => {
+    const model = HydraulicModelBuilder.with()
+      .aCustomAttribute("junction", {
+        id: "custom-1",
+        label: "Zone, area",
+        type: "text",
+      })
+      .aJunction(1, { label: "J1" })
+      .build();
+    model.assets.get(1)!.setProperty("custom-1", "north");
+
+    const files = exportCsv(model, WGS84, translate);
+    const lines = await readCsv(findFile(files, "junctions.csv"));
+
+    expect(lines[0]).toContain('"Zone, area"');
+  });
+
+  it("localizes customer point headers", async () => {
+    const model = HydraulicModelBuilder.with()
+      .aCustomerPoint(10, { label: "CP1", coordinates: [0, 0] })
+      .build();
+
+    const files = exportCsv(model, WGS84, translateStub);
+    const lines = await readCsv(findFile(files, "customer-points.csv"));
+    const headers = lines[0].split(",").filter(Boolean);
+
+    expect(headers).toContain("Etiqueta");
+    expect(headers).toContain("junction");
+    expect(headers).not.toContain("junctionConnection");
+  });
+});
+
+const translateStub = (key: string) => {
+  const translations: Record<string, string> = {
+    elevation: "Elevación",
+    pressure: "Presión",
+    simulation: "Simulación",
+    label: "Etiqueta",
+  };
+  return translations[key] ?? key;
+};
+
+const mockResultsReader = (pressure: number, demand: number) => {
+  return {
+    getJunction: vi.fn().mockReturnValue({ pressure, demand }),
+    getTank: vi.fn().mockReturnValue({}),
+    getReservoir: vi.fn().mockReturnValue({}),
+    getPipe: vi.fn().mockReturnValue({}),
+    getPump: vi.fn().mockReturnValue({}),
+    getValve: vi.fn().mockReturnValue({}),
+  } as unknown as ResultsReader;
+};
+
+const findFile = (files: ExportedFile[], name: string) =>
+  files.find((f) => f.fileName === name)!;
+
+const readCsv = async (file: ExportedFile) => {
+  const text = await file.blob.text();
+  return text.split("\n").filter(Boolean);
+};
+
+const parseCsvRows = (lines: string[]) => {
+  const headers = lines[0].split(",").filter(Boolean);
+  return lines.slice(1).map((line) => {
+    const values = line.split(",");
+    return Object.fromEntries(headers.map((h, i) => [h, values[i] ?? ""]));
+  });
+};

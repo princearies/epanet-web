@@ -1,0 +1,391 @@
+import { useCallback, useContext } from "react";
+import { FeatureCollection } from "geojson";
+import { LngLatBoundsLike } from "mapbox-gl";
+import type { FileWithHandle } from "browser-fs-access";
+
+import { useFileOpen } from "src/hooks/use-file-open";
+import { useUnsavedChangesCheck } from "./check-unsaved-changes";
+import {
+  useOpenPersistedProject,
+  type OpenPersistedProjectPhase,
+} from "src/hooks/persistence/use-open-persisted-project";
+import { withDatabaseBusy } from "src/hooks/persistence/use-start-new-project";
+import { withProgressDialog } from "src/dialogs/progress-dialog";
+import { useUserTracking } from "src/infra/user-tracking";
+import { chooseUnitSystem } from "src/simulation/build-inp";
+import type { Asset } from "src/hydraulic-model";
+import { notify } from "src/components/notifications";
+import { SuccessIcon, WarningIcon } from "src/icons";
+import { captureError, captureWarning } from "src/infra/error-tracking";
+import { catchErrors, handleError } from "src/infra/errors";
+import { formatErrorDetails } from "src/lib/errors";
+import { useTranslate } from "src/hooks/use-translate";
+import { useRecentFiles } from "src/hooks/use-recent-files";
+
+import { useSetAtom } from "jotai";
+import { inpFileInfoAtom, projectFileInfoAtom } from "src/state/file-system";
+import { savedProjectRevisionAtom } from "src/state/project-revision";
+import { dialogAtom } from "src/state/dialog";
+import { MapContext, captureThumbnail } from "src/map";
+import { getExtent } from "@epanet-js/geometry";
+import { projectExtension } from "./save-project";
+import { inpExtension, useImportInp } from "./import-inp";
+import { useConvertFile } from "./convert-model";
+import { converterExtensions, converterForFile } from "src/lib/converters";
+import { useAvailableConverters } from "src/hooks/use-available-converters";
+import { usePermissions } from "src/hooks/use-permissions";
+import { describeFileTypes } from "src/lib/describe-file-types";
+
+export const openProjectShortcut = "ctrl+o";
+
+type OpenProjectFileOptions = {
+  isUnsaved?: boolean;
+  lastSavedAt?: number;
+  isDemoNetwork?: boolean;
+};
+
+export const useOpenProjectFile = () => {
+  const { openPersistedProject } = useOpenPersistedProject();
+  const setInpFileInfo = useSetAtom(inpFileInfoAtom);
+  const setProjectFileInfo = useSetAtom(projectFileInfoAtom);
+  const setSavedProjectRevision = useSetAtom(savedProjectRevisionAtom);
+  const setDialogState = useSetAtom(dialogAtom);
+  const map = useContext(MapContext);
+  const translate = useTranslate();
+  const userTracking = useUserTracking();
+  const { addRecent } = useRecentFiles();
+
+  const openProjectFile = useCallback(
+    async (
+      file: FileWithHandle,
+      source: string,
+      options: OpenProjectFileOptions = {},
+    ) => {
+      try {
+        const { result } = await withProgressDialog(
+          setDialogState,
+          "opening" as OpenPersistedProjectPhase,
+          (phase: OpenPersistedProjectPhase) => ({
+            type: "openProjectProgress" as const,
+            phase,
+          }),
+          (onProgress) => openPersistedProject({ file, onProgress }),
+        );
+
+        if (result.status !== "ok") {
+          setDialogState(null);
+          if (result.status === "too-new") {
+            notify({
+              variant: "warning",
+              size: "md",
+              title: "Project file is too new",
+              description:
+                "This file was created by a newer version of the app. Please update to open it.",
+              details: `File version ${result.fileVersion}, app version ${result.appVersion}.`,
+              Icon: WarningIcon,
+            });
+            userTracking.capture({
+              name: "projectFile.openFailed",
+              source,
+              reason: "tooNew",
+              fileVersion: result.fileVersion,
+              appVersion: result.appVersion,
+            });
+            return;
+          }
+          if (result.status === "corrupt") {
+            notify({
+              variant: "warning",
+              size: "md",
+              title: "Project file is invalid",
+              description:
+                "The file couldn't be read as a project. It may be corrupt or saved in a different format.",
+              details: result.errorDetails,
+              Icon: WarningIcon,
+            });
+            captureError(
+              new Error(
+                `openProject corrupt (${file.name}): ${result.errorDetails}`,
+              ),
+            );
+            userTracking.capture({
+              name: "projectFile.openFailed",
+              source,
+              reason: "corrupt",
+            });
+            return;
+          }
+          if (result.status === "migration-failed") {
+            notify({
+              variant: "warning",
+              size: "md",
+              title: "Couldn't open project",
+              description:
+                "The project file couldn't be upgraded to this version of the app.",
+              details: `File version ${result.fileVersion}, app version ${result.appVersion}.\n${result.errorDetails}`,
+              Icon: WarningIcon,
+            });
+            captureError(
+              new Error(
+                `openProject migration-failed (${file.name}, v${result.fileVersion}→${result.appVersion}): ${result.errorDetails}`,
+              ),
+            );
+            userTracking.capture({
+              name: "projectFile.openFailed",
+              source,
+              reason: "migrationFailed",
+              fileVersion: result.fileVersion,
+              appVersion: result.appVersion,
+            });
+            return;
+          }
+          notify({
+            variant: "warning",
+            size: "md",
+            title: "Couldn't open project",
+            description: "Something went wrong while opening the file.",
+            details: result.errorDetails,
+            Icon: WarningIcon,
+          });
+          captureError(
+            new Error(
+              `openProject internal (${file.name}): ${result.errorDetails}`,
+            ),
+          );
+          userTracking.capture({
+            name: "projectFile.openFailed",
+            source,
+            reason: "internal",
+          });
+          return;
+        }
+
+        setProjectFileInfo({
+          name: file.name,
+          handle: file.handle,
+          isDemoNetwork: options.isDemoNetwork,
+          lastSavedAt: options.isUnsaved
+            ? options.lastSavedAt
+            : file.lastModified,
+        });
+        setInpFileInfo(null);
+        if (options.isUnsaved) {
+          setSavedProjectRevision(null);
+        }
+
+        const features: FeatureCollection = {
+          type: "FeatureCollection",
+          features: [...result.hydraulicModel.assets.values()].map(
+            (a) => a.feature,
+          ),
+        };
+        getExtent(features).map((importedExtent) => {
+          map?.map.fitBounds(importedExtent as LngLatBoundsLike, {
+            padding: 100,
+            duration: 0,
+          });
+        });
+
+        if (file.handle) {
+          const handle = file.handle;
+          const name = file.name;
+          if (map) {
+            map.enqueueOnSettle(() => {
+              const thumbnail = captureThumbnail(map) ?? undefined;
+              void addRecent(name, handle, thumbnail);
+            });
+          } else {
+            void addRecent(name, file.handle);
+          }
+        }
+
+        setDialogState(null);
+        notify({
+          variant: "success",
+          title: translate("projectOpened"),
+          Icon: SuccessIcon,
+          size: "sm",
+        });
+
+        userTracking.capture({
+          name: "projectFile.opened",
+          source,
+          counts: tallyAssetCounts(result.hydraulicModel.assets),
+          headlossFormula: result.projectSettings.headlossFormula,
+          units: chooseUnitSystem(result.projectSettings.units),
+          ...(result.uniqueId
+            ? {
+                uniqueId: result.uniqueId,
+                filename: file.name,
+                projectName: result.projectSettings.name,
+              }
+            : {}),
+        });
+      } catch (error) {
+        setDialogState(null);
+        const err = error as Error;
+        if (err.name === "NotFoundError" || err.name === "NotAllowedError") {
+          throw err;
+        }
+        handleError(error, {
+          as: `openProject exception (${file.name}): ${formatErrorDetails(error)}`,
+          warn: ["NotReadableError"],
+          onUnexpected: "capture",
+        });
+        notify({
+          variant: "warning",
+          size: "md",
+          title: "Couldn't open project",
+          description: "Something went wrong while opening the file.",
+          details: formatErrorDetails(error),
+          Icon: WarningIcon,
+        });
+        userTracking.capture({
+          name: "projectFile.openFailed",
+          source,
+          reason: "exception",
+        });
+      }
+    },
+    [
+      openPersistedProject,
+      setInpFileInfo,
+      setProjectFileInfo,
+      setSavedProjectRevision,
+      setDialogState,
+      map,
+      translate,
+      userTracking,
+      addRecent,
+    ],
+  );
+
+  return useCallback(
+    async (
+      file: FileWithHandle,
+      source: string,
+      options: OpenProjectFileOptions = {},
+    ) => {
+      await withDatabaseBusy(() => openProjectFile(file, source, options));
+    },
+    [openProjectFile],
+  );
+};
+
+const tallyAssetCounts = (
+  assets: Map<unknown, Asset>,
+): Record<string, number> => {
+  const counts: Record<string, number> = {};
+  for (const asset of assets.values()) {
+    counts[asset.type] = (counts[asset.type] ?? 0) + 1;
+  }
+  return counts;
+};
+
+export const useOpenProject = () => {
+  const checkUnsavedChanges = useUnsavedChangesCheck();
+  const { openFile, isReady } = useFileOpen();
+  const openProjectFile = useOpenProjectFile();
+  const importInp = useImportInp();
+  const converters = useAvailableConverters();
+  const { canImportSynergi } = usePermissions();
+  const convertFile = useConvertFile();
+  const userTracking = useUserTracking();
+  const setDialogState = useSetAtom(dialogAtom);
+  const translate = useTranslate();
+
+  const openProject = useCallback(
+    async ({ source }: { source: string }) => {
+      userTracking.capture({ name: "openProject.started", source });
+
+      if (!isReady) throw new Error("FS not ready");
+
+      const file = await openFile({
+        multiple: false,
+        extensions: [
+          projectExtension,
+          inpExtension,
+          ...converterExtensions(converters),
+        ],
+        description: describeFileTypes([
+          "Project",
+          "EPANET INP",
+          ...converters.map(({ converter }) => converter.name),
+        ]),
+        mimeTypes: ["application/octet-stream"],
+      });
+      if (!file) return;
+
+      const name = file.name.toLowerCase();
+      if (name.endsWith(inpExtension)) {
+        void importInp([file], source);
+        return;
+      }
+
+      if (!name.endsWith(projectExtension)) {
+        const match = converterForFile(converters, name);
+        if (match) {
+          userTracking.capture({
+            name: "convertModel.started",
+            source,
+            vendor: match.vendor,
+            canImportSynergi,
+          });
+          void convertFile(match.converter, match.vendor, file, source);
+          return;
+        }
+
+        setDialogState({ type: "invalidFilesError" });
+        userTracking.capture({ name: "invalidFilesError.seen" });
+        return;
+      }
+
+      try {
+        await openProjectFile(file, source);
+      } catch (error) {
+        const err = error as Error;
+        if (err.name === "NotAllowedError") {
+          notify({
+            variant: "warning",
+            title: translate("recentFilePermissionDenied"),
+          });
+          captureWarning("Open project: permission denied", err);
+          return;
+        }
+        if (err.name === "NotFoundError") {
+          notify({
+            variant: "warning",
+            title: translate("recentFileNotFound"),
+          });
+          captureWarning("Open project: file not found", err);
+          return;
+        }
+        throw err;
+      }
+    },
+    [
+      openFile,
+      isReady,
+      openProjectFile,
+      importInp,
+      converters,
+      convertFile,
+      userTracking,
+      setDialogState,
+      translate,
+      canImportSynergi,
+    ],
+  );
+
+  return useCallback(
+    ({ source }: { source: string }) => {
+      checkUnsavedChanges(() => {
+        void catchErrors(() => openProject({ source }), {
+          as: "openProject: failed to open",
+          onUnexpected: "capture",
+        });
+      });
+    },
+    [checkUnsavedChanges, openProject],
+  );
+};

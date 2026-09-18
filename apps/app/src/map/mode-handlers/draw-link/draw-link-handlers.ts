@@ -1,0 +1,756 @@
+import type { HandlerContext, Position } from "src/types";
+import type { MapEngine } from "src/map";
+import noop from "lodash/noop";
+import {
+  ephemeralStateAtom,
+  EphemeralEditingState,
+  pipeDrawingDefaultsAtom,
+} from "src/state/drawing";
+import { cursorStyleAtom } from "src/state/map";
+import { modeAtom, Mode } from "src/state/mode";
+import { selectionAtom } from "src/state/selection";
+import { useSetAtom, useAtom, useAtomValue } from "jotai";
+import { getMapCoord } from "../utils";
+import { useRef } from "react";
+import { useKeyboardState } from "src/keyboard";
+import measureLength from "@turf/length";
+import { useSnapping } from "../hooks/use-snapping";
+import { captureError } from "src/infra/error-tracking";
+import { nextTick } from "process";
+import { Asset, AssetId, LinkAsset, NodeAsset } from "src/hydraulic-model";
+import { useUserTracking } from "src/infra/user-tracking";
+import { LinkType } from "src/hydraulic-model";
+import { useElevations } from "src/hooks/use-elevations";
+import { MapMouseEvent, MapTouchEvent } from "mapbox-gl";
+import { useSelection } from "src/selection";
+import { useFocusAssetPanel } from "src/hooks/use-focus-asset-panel";
+import { validateAsset } from "src/lib/model-attributes-validation";
+import { DEFAULT_SNAP_DISTANCE_PIXELS } from "../../search";
+import { addLink } from "src/hydraulic-model/model-operations";
+import { modelFactoriesAtom } from "src/state/model-factories";
+import { projectSettingsAtom } from "src/state/project-settings";
+import { useMomentTransaction } from "src/hooks/persistence/use-moment-transaction";
+
+const MIN_VERTEX_PIXEL_DISTANCE = 8;
+
+export type SnappingCandidate =
+  | NodeAsset
+  | {
+      type: "pipe";
+      id: AssetId;
+      coordinates: Position;
+      vertexIndex: number | null;
+    };
+
+export type SubmitLinkParams = {
+  startNode: NodeAsset;
+  link: LinkAsset;
+  endNode: NodeAsset;
+  startPipeId?: AssetId;
+  endPipeId?: AssetId;
+};
+
+type NullDrawing = {
+  isNull: true;
+  snappingCandidate: SnappingCandidate | null;
+};
+
+type DrawingState =
+  | {
+      isNull: false;
+      startNode: NodeAsset;
+      startPipeId?: AssetId;
+      startNodeNeedsElevation?: boolean;
+      link: LinkAsset;
+      snappingCandidate: SnappingCandidate | null;
+    }
+  | NullDrawing;
+
+function isWithinSnappingDistance(
+  map: MapEngine,
+  position1: Position,
+  position2: Position,
+): boolean {
+  const screen1 = map.map.project([position1[0], position1[1]]);
+  const screen2 = map.map.project([position2[0], position2[1]]);
+
+  const pixelDistance = Math.sqrt(
+    Math.pow(screen1.x - screen2.x, 2) + Math.pow(screen1.y - screen2.y, 2),
+  );
+
+  return pixelDistance < DEFAULT_SNAP_DISTANCE_PIXELS;
+}
+
+function getSnappingCandidateIfEnabled(
+  event: MapMouseEvent | MapTouchEvent,
+  position: Position,
+  isSnapping: () => boolean,
+  findSnappingCandidate: (
+    e: MapMouseEvent | MapTouchEvent,
+    pos: Position,
+  ) => SnappingCandidate | null,
+): SnappingCandidate | null {
+  return isSnapping() ? findSnappingCandidate(event, position) : null;
+}
+
+type LoopedLinkCheck = {
+  isLoopedLink: boolean;
+  isHoveringEphemeralStart: boolean;
+  shouldPrevent: boolean;
+};
+
+function checkLoopedLinkConditions(
+  drawing: DrawingState,
+  snappingCandidate: SnappingCandidate | null,
+  currentPosition: Position,
+  map: MapEngine,
+): LoopedLinkCheck {
+  if (drawing.isNull) {
+    return {
+      isLoopedLink: false,
+      isHoveringEphemeralStart: false,
+      shouldPrevent: false,
+    };
+  }
+
+  const isLoopedLink =
+    snappingCandidate !== null &&
+    snappingCandidate.type !== "pipe" &&
+    snappingCandidate.id === drawing.startNode.id;
+
+  const linkCopy = drawing.link.copy();
+  const isHoveringEphemeralStart =
+    !snappingCandidate &&
+    isWithinSnappingDistance(map, linkCopy.firstVertex, currentPosition) &&
+    !linkCopy.isStart(linkCopy.lastVertex);
+
+  return {
+    isLoopedLink,
+    isHoveringEphemeralStart,
+    shouldPrevent: isLoopedLink || isHoveringEphemeralStart,
+  };
+}
+
+function isNewVertexTooClose(
+  existingCoordinates: Position[],
+  newCoordinates: Position,
+  map: MapEngine,
+): boolean {
+  if (existingCoordinates.length < 2) return false;
+
+  // Caller normalizes the last slot to the click position (the "preview"); the previous committed vertex is at length - 2.
+  const previousCommitted = existingCoordinates[existingCoordinates.length - 2];
+  const previousScreen = map.map.project([
+    previousCommitted[0],
+    previousCommitted[1],
+  ]);
+  const newScreen = map.map.project([newCoordinates[0], newCoordinates[1]]);
+  const pixelDistance = Math.hypot(
+    newScreen.x - previousScreen.x,
+    newScreen.y - previousScreen.y,
+  );
+  return pixelDistance < MIN_VERTEX_PIXEL_DISTANCE;
+}
+
+export function useDrawLinkHandlers({
+  hydraulicModel,
+  units,
+  map,
+  linkType,
+  sourceLink,
+  onSubmitLink,
+  disableEndAndContinue,
+  readonly = false,
+}: HandlerContext & {
+  linkType: LinkType;
+  sourceLink?: LinkAsset;
+  onSubmitLink?: (params: SubmitLinkParams) => NodeAsset | undefined;
+  disableEndAndContinue?: boolean;
+}): Handlers {
+  const isUpdatingRef = useRef(false);
+  const setMode = useSetAtom(modeAtom);
+  const [ephemeralState, setEphemeralState] = useAtom(ephemeralStateAtom);
+  const selection = useAtomValue(selectionAtom);
+  const { selectAsset } = useSelection(selection);
+  const focusAssetPanel = useFocusAssetPanel();
+
+  const selectAndFocusIfInvalid = (asset: Asset) => {
+    selectAsset(asset.id);
+    const hasIssues = validateAsset(asset, hydraulicModel).length > 0;
+    if (hasIssues) focusAssetPanel(true);
+  };
+  const { transact } = useMomentTransaction();
+  const userTracking = useUserTracking();
+  const usingTouchEvents = useRef<boolean>(false);
+  const { assetFactory, labelManager } = useAtomValue(modelFactoriesAtom);
+  const lengthUnit = units.length;
+  const { findSnappingCandidate } = useSnapping(map, hydraulicModel.assets);
+
+  const { isShiftHeld, isControlHeld } = useKeyboardState();
+  const setCursor = useSetAtom(cursorStyleAtom);
+  const pipeDrawingDefaults = useAtomValue(pipeDrawingDefaultsAtom);
+  const { defaults } = useAtomValue(projectSettingsAtom);
+
+  const createLinkForType = (coordinates: Position[] = []) => {
+    const startProperties = {
+      label: "",
+      coordinates,
+    };
+    switch (linkType) {
+      case "pipe":
+        return assetFactory.createPipe({
+          ...startProperties,
+          ...(pipeDrawingDefaults.diameter === null
+            ? {}
+            : {
+                diameter:
+                  pipeDrawingDefaults.diameter ?? defaults.pipe.diameter,
+              }),
+          ...(pipeDrawingDefaults.roughness === null
+            ? {}
+            : {
+                roughness:
+                  pipeDrawingDefaults.roughness ?? defaults.pipe.roughness ?? 0,
+              }),
+        });
+      case "pump":
+        return assetFactory.createPump({
+          ...startProperties,
+          definitionType: "designPointCurve",
+        });
+      case "valve":
+        return assetFactory.createValve(startProperties);
+    }
+  };
+
+  const resetDrawing = () => {
+    setCursor("default");
+    setEphemeralState({ type: "none" });
+  };
+
+  const getDrawingState = (): DrawingState => {
+    if (ephemeralState.type === "drawLink" && ephemeralState.startNode) {
+      return {
+        isNull: false,
+        startNode: ephemeralState.startNode,
+        startPipeId: ephemeralState.startPipeId,
+        startNodeNeedsElevation: ephemeralState.startNodeNeedsElevation,
+        snappingCandidate: ephemeralState.snappingCandidate || null,
+        link: ephemeralState.link as LinkAsset,
+      };
+    }
+    return {
+      isNull: true,
+      snappingCandidate:
+        ephemeralState.type === "drawLink"
+          ? ephemeralState.snappingCandidate
+          : null,
+    };
+  };
+
+  const setDrawing = ({
+    startNode,
+    link,
+    snappingCandidate,
+    startPipeId,
+    startNodeNeedsElevation,
+    draftJunction,
+  }: {
+    startNode: NodeAsset;
+    link: LinkAsset;
+    snappingCandidate: SnappingCandidate | null;
+    startPipeId?: AssetId;
+    startNodeNeedsElevation?: boolean;
+    draftJunction?: NodeAsset;
+  }) => {
+    setEphemeralState({
+      type: "drawLink",
+      link,
+      linkType,
+      startNode,
+      startPipeId,
+      startNodeNeedsElevation,
+      snappingCandidate,
+      ...(sourceLink && { sourceLink }),
+      ...(draftJunction && { draftJunction }),
+    });
+  };
+
+  const setSnappingCandidate = (
+    snappingCandidate: SnappingCandidate | null,
+  ) => {
+    setEphemeralState((prev: EphemeralEditingState) => {
+      if (prev.type !== "drawLink") {
+        const link = createLinkForType();
+
+        return {
+          type: "drawLink",
+          linkType,
+          link,
+          snappingCandidate,
+          ...(sourceLink && { sourceLink }),
+        };
+      }
+
+      if (prev.snappingCandidate === snappingCandidate) {
+        return prev;
+      }
+
+      return {
+        ...prev,
+        snappingCandidate,
+      };
+    });
+  };
+
+  const drawing = getDrawingState();
+
+  const startDrawing = ({
+    startNode,
+    startPipeId,
+    startNodeNeedsElevation,
+  }: {
+    startNode: NodeAsset;
+    startPipeId?: AssetId;
+    startNodeNeedsElevation?: boolean;
+  }) => {
+    const coordinates = startNode.coordinates;
+    const link = sourceLink ? sourceLink.copy() : createLinkForType();
+    link.setCoordinates([coordinates, coordinates]);
+
+    setDrawing({
+      startNode,
+      link,
+      snappingCandidate: null,
+      startPipeId,
+      startNodeNeedsElevation,
+    });
+    setCursor("default");
+    return link.id;
+  };
+
+  const addVertex = (coordinates: Position) => {
+    if (drawing.isNull) return;
+
+    // In mouse flow, the `move` handler keeps the last coord aligned with the cursor between clicks.
+    // In touch flow no move events fire between taps, so the last slot can still hold the previous tap.
+    // Normalize the last slot to the click position before checking and appending.
+    const normalizedCoords = [
+      ...drawing.link.coordinates.slice(0, -1),
+      coordinates,
+    ];
+
+    if (isNewVertexTooClose(normalizedCoords, coordinates, map)) return;
+
+    const linkCopy = drawing.link.copy();
+    linkCopy.setCoordinates([...normalizedCoords, coordinates]);
+    setDrawing({
+      startNode: drawing.startNode,
+      startPipeId: drawing.startPipeId,
+      startNodeNeedsElevation: drawing.startNodeNeedsElevation,
+      link: linkCopy,
+      snappingCandidate: null,
+    });
+  };
+
+  const submitLink = ({
+    startNode,
+    link,
+    endNode,
+    startPipeId,
+    endPipeId,
+  }: {
+    startNode: NodeAsset;
+    link: LinkAsset;
+    endNode: NodeAsset;
+    startPipeId?: AssetId;
+    endPipeId?: AssetId;
+  }) => {
+    if (submittedLinkIdRef.current === link.id) {
+      return undefined;
+    }
+
+    const length = measureLength(link.feature);
+    if (!length) {
+      return;
+    }
+
+    submittedLinkIdRef.current = link.id;
+
+    const moment = addLink(hydraulicModel, {
+      link: link,
+      startNode,
+      endNode,
+      startPipeId,
+      endPipeId,
+      lengthUnit,
+      assetFactory,
+      labelManager,
+    });
+
+    const applied = transact(moment);
+    if (!applied) return undefined;
+
+    userTracking.capture({ name: "asset.created", type: link.type });
+
+    if (moment.putAssets && moment.putAssets.length > 0) {
+      selectAndFocusIfInvalid(moment.putAssets[0]);
+    }
+
+    const [, , endNodeUpdated] = moment.putAssets || [];
+    return endNodeUpdated as NodeAsset;
+  };
+
+  const isSnapping = () => !isShiftHeld();
+  const isEndAndContinueOn = disableEndAndContinue
+    ? () => false
+    : isControlHeld;
+
+  const coordinatesToLngLat = (coordinates: Position) => {
+    const [lng, lat] = coordinates;
+    return { lng, lat };
+  };
+  const { fetchElevation, prefetchTileThrottled } = useElevations(
+    units.elevation,
+  );
+
+  // A single finishing gesture (e.g. double-click on a snap target) fires
+  // `click` and `dblclick`, both reading the same stale `drawing` closure. Track
+  // the last submitted link id so the same drawing can't be submitted twice
+  // (which would re-split an already-deleted pipe and crash, or duplicate links).
+  const submittedLinkIdRef = useRef<AssetId | null>(null);
+
+  const startElevationFetch = () => {
+    isUpdatingRef.current = true;
+    setCursor("wait");
+  };
+
+  const finishElevationFetch = () => {
+    setCursor("default");
+    nextTick(() => (isUpdatingRef.current = false));
+  };
+
+  const createPendingJunction = (coordinates: Position) =>
+    assetFactory.createJunction({
+      label: "",
+      coordinates,
+    });
+
+  const withElevation = (node: NodeAsset, elevation: number | null) => {
+    const nodeCopy = node.copy();
+    nodeCopy.setElevation(elevation);
+    return nodeCopy;
+  };
+
+  const resolvePendingElevations = (
+    pendingNodes: NodeAsset[],
+    submit: (resolve: (node: NodeAsset) => NodeAsset) => void,
+  ) => {
+    if (!pendingNodes.length) {
+      submit((node) => node);
+      return;
+    }
+
+    startElevationFetch();
+    void Promise.all(
+      pendingNodes.map((node) =>
+        fetchElevation(coordinatesToLngLat(node.coordinates)),
+      ),
+    )
+      .then((elevations) => {
+        const byId = new Map(
+          pendingNodes.map((node, index) => [node.id, elevations[index]]),
+        );
+        submit((node) => {
+          const elevation = byId.get(node.id);
+          return elevation === undefined
+            ? node
+            : withElevation(node, elevation);
+        });
+      })
+      .finally(finishElevationFetch);
+  };
+
+  const submitAndContinue = (submitParams: SubmitLinkParams) => {
+    const endNode = onSubmitLink
+      ? onSubmitLink(submitParams)
+      : submitLink(submitParams);
+
+    if (isEndAndContinueOn() && endNode) {
+      startDrawing({ startNode: endNode });
+    } else {
+      resetDrawing();
+    }
+  };
+
+  const handleClick: Handlers["click"] = (e) => {
+    if (readonly) return;
+    if (isUpdatingRef.current) return;
+    if (disableEndAndContinue && isControlHeld()) return;
+
+    const currentPosition = getMapCoord(e);
+    const snappingCandidate = getSnappingCandidateIfEnabled(
+      e,
+      currentPosition,
+      isSnapping,
+      findSnappingCandidate,
+    );
+
+    if (!drawing.isNull) {
+      const check = checkLoopedLinkConditions(
+        drawing,
+        snappingCandidate,
+        currentPosition,
+        map,
+      );
+      if (check.shouldPrevent) return;
+    }
+
+    const clickPosition = snappingCandidate
+      ? snappingCandidate.coordinates
+      : currentPosition;
+
+    if (drawing.isNull) {
+      if (snappingCandidate && snappingCandidate.type !== "pipe") {
+        startDrawing({ startNode: snappingCandidate });
+        return;
+      }
+
+      startDrawing({
+        startNode: createPendingJunction(clickPosition),
+        startPipeId: snappingCandidate ? snappingCandidate.id : undefined,
+        startNodeNeedsElevation: true,
+      });
+      return;
+    }
+
+    const { startNode, startPipeId, startNodeNeedsElevation, link } = drawing;
+    const pendingNodes = startNodeNeedsElevation ? [startNode] : [];
+
+    if (snappingCandidate && snappingCandidate.type !== "pipe") {
+      resolvePendingElevations(pendingNodes, (resolve) =>
+        submitAndContinue({
+          startNode: resolve(startNode),
+          startPipeId,
+          link,
+          endNode: snappingCandidate,
+        }),
+      );
+      return;
+    }
+
+    if (!snappingCandidate && !isEndAndContinueOn()) {
+      addVertex(clickPosition);
+      return;
+    }
+
+    const endNode = createPendingJunction(clickPosition);
+
+    if (snappingCandidate) {
+      resolvePendingElevations([...pendingNodes, endNode], (resolve) =>
+        submitAndContinue({
+          startNode: resolve(startNode),
+          startPipeId,
+          link,
+          endNode: resolve(endNode),
+          endPipeId: snappingCandidate.id,
+        }),
+      );
+      return;
+    }
+
+    resolvePendingElevations([...pendingNodes, endNode], (resolve) => {
+      const submitParams = {
+        startNode: resolve(startNode),
+        startPipeId,
+        link,
+        endNode: resolve(endNode),
+      };
+      const endJunction = onSubmitLink
+        ? onSubmitLink(submitParams)
+        : submitLink(submitParams);
+      if (endJunction) {
+        startDrawing({ startNode: endJunction });
+      }
+    });
+  };
+
+  const handleDouble: Handlers["double"] = (e) => {
+    e.preventDefault();
+
+    if (drawing.isNull) return;
+    if (isUpdatingRef.current) return;
+
+    const currentPosition = getMapCoord(e);
+    const snappingCandidate = getSnappingCandidateIfEnabled(
+      e,
+      currentPosition,
+      isSnapping,
+      findSnappingCandidate,
+    );
+    const check = checkLoopedLinkConditions(
+      drawing,
+      snappingCandidate,
+      currentPosition,
+      map,
+    );
+
+    if (check.shouldPrevent) return;
+
+    const { startNode, startPipeId, startNodeNeedsElevation, link } = drawing;
+    const endNode = createPendingJunction(link.lastVertex);
+    const pendingNodes = startNodeNeedsElevation
+      ? [startNode, endNode]
+      : [endNode];
+
+    resolvePendingElevations(pendingNodes, (resolve) => {
+      const submitParams = {
+        startNode: resolve(startNode),
+        startPipeId,
+        link,
+        endNode: resolve(endNode),
+      };
+      try {
+        onSubmitLink ? onSubmitLink(submitParams) : submitLink(submitParams);
+      } catch (error) {
+        captureError(error as Error);
+      }
+      resetDrawing();
+    });
+  };
+
+  const handlers: Handlers = {
+    click: handleClick,
+    move: (e) => {
+      if (isUpdatingRef.current) return;
+
+      const isApplePencil = e.type === "mousemove" && usingTouchEvents.current;
+      if (isApplePencil) {
+        return;
+      }
+
+      void prefetchTileThrottled(e.lngLat);
+
+      const snappingCandidate = getSnappingCandidateIfEnabled(
+        e,
+        getMapCoord(e),
+        isSnapping,
+        findSnappingCandidate,
+      );
+
+      if (drawing.isNull) {
+        setSnappingCandidate(snappingCandidate);
+      } else {
+        const nextCoordinates =
+          (snappingCandidate && snappingCandidate.coordinates) ||
+          getMapCoord(e);
+
+        const linkCopy = drawing.link.copy();
+        linkCopy.setCoordinates([
+          ...linkCopy.coordinates.slice(0, -1),
+          nextCoordinates,
+        ]);
+
+        const shouldShowDraftJunction =
+          isEndAndContinueOn() && !snappingCandidate;
+
+        const draftJunction = shouldShowDraftJunction
+          ? assetFactory.createJunction({
+              label: "",
+              coordinates: nextCoordinates,
+            })
+          : undefined;
+
+        const check = checkLoopedLinkConditions(
+          drawing,
+          snappingCandidate,
+          nextCoordinates,
+          map,
+        );
+
+        if (check.shouldPrevent) {
+          setCursor("not-allowed");
+        } else {
+          setCursor("default");
+        }
+
+        setDrawing({
+          ...drawing,
+          link: linkCopy,
+          snappingCandidate: check.shouldPrevent ? null : snappingCandidate,
+          draftJunction,
+        });
+      }
+    },
+    double: handleDouble,
+    exit() {
+      const currentDrawing = getDrawingState();
+
+      setCursor("default");
+
+      if (!currentDrawing.isNull) {
+        if (sourceLink) {
+          setEphemeralState({
+            type: "drawLink",
+            linkType,
+            snappingCandidate: null,
+            sourceLink,
+          });
+        } else {
+          resetDrawing();
+        }
+      } else if (sourceLink) {
+        resetDrawing();
+        setMode({ mode: Mode.NONE });
+      } else {
+        resetDrawing();
+        setMode({ mode: Mode.NONE });
+      }
+    },
+    touchstart: (e) => {
+      usingTouchEvents.current = true;
+      e.preventDefault();
+    },
+
+    touchmove: (e) => {
+      handlers.move(e);
+    },
+
+    touchend: (e) => {
+      handlers.click(e);
+    },
+
+    down: (e) => {
+      if (e.type === "mousedown") {
+        usingTouchEvents.current = false;
+      }
+    },
+    up: noop,
+    keydown: () => {
+      if (
+        isEndAndContinueOn() &&
+        !drawing.isNull &&
+        !drawing.snappingCandidate
+      ) {
+        const draftJunction = assetFactory.createJunction({
+          label: "",
+          coordinates: drawing.link.lastVertex,
+        });
+        setDrawing({
+          ...drawing,
+          draftJunction,
+        });
+      }
+    },
+    keyup: () => {
+      if (!isControlHeld() && !drawing.isNull) {
+        setDrawing({
+          ...drawing,
+          draftJunction: undefined,
+        });
+      }
+    },
+  };
+
+  return handlers;
+}

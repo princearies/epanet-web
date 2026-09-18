@@ -1,0 +1,319 @@
+import {
+  LucideProps,
+  LucideIcon,
+  ArrowDownWideNarrow,
+  ArrowDownUp,
+  ArrowRight,
+  ArrowUpNarrowWide,
+  Archive,
+  GitPullRequestArrow,
+  Bell,
+  BookText,
+  Bookmark,
+  ChartColumn,
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronUp,
+  ChevronsLeft,
+  Circle,
+  CircleCheck,
+  CircleDotDashed,
+  CircleQuestionMark,
+  CircleSlash2,
+  CircleX,
+  Copy,
+  ClipboardPaste,
+  Crosshair,
+  Download,
+  EllipsisVertical,
+  Eye,
+  EyeOff,
+  File,
+  FileBox,
+  FileCode,
+  FilePlus,
+  FilePlus2,
+  Database,
+  FileSpreadsheet,
+  FileText,
+  Folder,
+  FolderOpen,
+  GitBranch,
+  GitBranchPlus,
+  Goal,
+  Globe,
+  Grid2X2,
+  GripVertical,
+  History,
+  House,
+  HousePlus,
+  Info,
+  Keyboard,
+  Lasso,
+  Layers,
+  Link2,
+  Link2Off,
+  ListChecks,
+  ListPlus,
+  Lock,
+  Locate,
+  LocateOff,
+  MapIcon,
+  MapPinned,
+  MapPinXInside,
+  Menu,
+  MousePointer2,
+  MousePointerClick,
+  PanelBottom,
+  PanelLeft,
+  PanelRight,
+  Pause,
+  Pencil,
+  PencilLine,
+  Pin,
+  PinOff,
+  Play,
+  Plus,
+  RectangleHorizontal,
+  Redo2,
+  RefreshCw,
+  Rocket,
+  Route,
+  RouteOff,
+  Save,
+  SaveAll,
+  ScanText,
+  Search,
+  Settings,
+  SquareArrowOutUpRight,
+  SquareDashed,
+  SquareDashedMousePointer,
+  SquareStack,
+  SquircleDashed,
+  Star,
+  Sun,
+  Table,
+  TextCursorInput,
+  Timer,
+  Trash,
+  Triangle,
+  TriangleAlert,
+  Type,
+  ToolCase,
+  Undo2,
+  Upload,
+  User,
+  Waypoints,
+  X,
+  CirclePause,
+  Zap,
+  ChartLine,
+  FolderDown,
+  FolderUp,
+} from "lucide-react";
+
+export const iconSizes = {
+  sm: 12,
+  md: 16,
+  lg: 20,
+  xl: 24,
+  "2xl": 96,
+} as const;
+
+export type IconSizeKey = keyof typeof iconSizes;
+
+export type CustomIconProps = Omit<React.SVGProps<SVGSVGElement>, "size"> & {
+  size?: IconSizeKey | number;
+};
+
+type IconProps = Omit<LucideProps, "size"> & {
+  size?: IconSizeKey | number;
+};
+
+export const getPixels = (rawSize: IconSizeKey | number) => {
+  if (typeof rawSize === "number") return rawSize;
+
+  return iconSizes[rawSize];
+};
+
+const icon = (Icon: LucideIcon): React.FC<IconProps> => {
+  return ({ size: rawSize = "md", ...props }) => {
+    const pixels = getPixels(rawSize);
+
+    return <Icon size={pixels} {...props} />;
+  };
+};
+
+export const HelpIcon = icon(CircleQuestionMark);
+export const RoadmapIcon = icon(MapIcon);
+export const MapStylingIcon = icon(Layers);
+export const MapPinnedIcon = icon(MapPinned);
+export const MapPinXInsideIcon = icon(MapPinXInside);
+export const UtilitiesIcon = icon(ToolCase);
+export const InfoIcon = icon(Info);
+export const SuccessIcon = icon(CircleCheck);
+export const WarningIcon = icon(TriangleAlert);
+export const ExternalLinkIcon = icon(SquareArrowOutUpRight);
+export const ErrorIcon = icon(CircleX);
+export const StopSimulationIcon = icon(CirclePause);
+export const UserIcon = icon(User);
+export const RefreshIcon = icon(RefreshCw);
+export const SpinnerIcon: React.FC<IconProps> = (props) => (
+  <RefreshIcon {...props} className={`${props.className ?? ""} animate-spin`} />
+);
+export const PencilIcon = icon(Pencil);
+export const RedrawIcon = icon(PencilLine);
+export const ArrowRightIcon = icon(ArrowRight);
+export const ChevronUpIcon = icon(ChevronUp);
+export const ChevronRightIcon = icon(ChevronRight);
+export const ChevronDownIcon = icon(ChevronDown);
+export const ChevronLeftIcon = icon(ChevronLeft);
+export const ChevronsLeftIcon = icon(ChevronsLeft);
+export const CloseIcon = icon(X);
+export const UploadIcon = icon(Upload);
+export const DownloadIcon = icon(Download);
+export const EarlyAccessIcon = icon(Star);
+export const LabelsIcon = icon(Type);
+export const CheckIcon = icon(Check);
+export const KeyboardIcon = icon(Keyboard);
+export const FileIcon = icon(File);
+export const FileAddIcon = icon(FilePlus);
+export const FilePlusCornerIcon = icon(FilePlus2);
+export const FileTextIcon = icon(FileText);
+export const FileSpreadsheetIcon = icon(FileSpreadsheet);
+export const DatabaseIcon = icon(Database);
+export const FileBoxIcon = icon(FileBox);
+export const FolderIcon = icon(Folder);
+export const FolderOpenIcon = icon(FolderOpen);
+export const FolderInputIcon = icon(FolderUp);
+export const FolderOutputIcon = icon(FolderDown);
+export const DeleteIcon = icon(Trash);
+export const ZoomToIcon = icon(Crosshair);
+export const ActivateTopologyIcon = icon(Route);
+export const DeactivateTopologyIcon = icon(RouteOff);
+export const GlobeIcon = icon(Globe);
+export const SettingsIcon = icon(Settings);
+export const SearchIcon = icon(Search);
+export const UpgradeIcon = icon(Rocket);
+export const CircleIcon = icon(Circle);
+export const MenuIcon = icon(Menu);
+export const NewFromExampleIcon = icon(Sun);
+export const AddIcon = icon(Plus);
+export const UndoIcon = icon(Undo2);
+export const ArchiveIcon = icon(Archive);
+export const ConnectToPipeIcon = icon(GitPullRequestArrow);
+export const RedoIcon = icon(Redo2);
+export const SaveIcon = icon(Save);
+export const SaveAllIcon = icon(SaveAll);
+export const OutdatedSimulationIcon = icon(History);
+export const RunSimulationIcon = icon(Zap);
+export const TimerIcon = icon(Timer);
+export const CustomerPointIcon = icon(House);
+export const ImportCustomerPointsIcon = icon(HousePlus);
+export const UnavailableIcon = icon(CircleSlash2);
+export const MultipleAssetsIcon = icon(SquareStack);
+export const PanelBottomIcon = icon(PanelBottom);
+export const PanelLeftIcon = icon(PanelLeft);
+export const PanelRightIcon = icon(PanelRight);
+export const PauseIcon = icon(Pause);
+export const PlayIcon = icon(Play);
+export const MultipleValuesIcon = icon(SquareStack);
+export const JunctionIcon = icon(Circle);
+export const ReservoirIcon = icon(Triangle);
+export const TankIcon = icon(RectangleHorizontal);
+export const MouseCursorDefaultIcon = icon(MousePointer2);
+export const PointerClickIcon = icon(MousePointerClick);
+export const SubscribeIcon = icon(Bell);
+export const Draggable = icon(GripVertical);
+export const TabsIcon = icon(Grid2X2);
+export const VisibilityOnIcon = icon(Eye);
+export const VisibilityOffIcon = icon(EyeOff);
+export const ConnectIcon = icon(Link2);
+export const DisconnectIcon = icon(Link2Off);
+export const HouseIcon = icon(House);
+export const ConnectivityTraceIcon = icon(Waypoints);
+export const OrphanNodeIcon = icon(CircleDotDashed);
+export const EmptyStateIcon = icon(SquircleDashed);
+export const NoIssuesIcon = icon(Goal);
+export const RectangularSelectionIcon = icon(SquareDashed);
+export const FreeHandSelectionIcon = icon(Lasso);
+export const SortAscendingIcon = icon(ArrowUpNarrowWide);
+export const SortDescendingIcon = icon(ArrowDownWideNarrow);
+export const PinIcon = icon(Pin);
+export const PinOffIcon = icon(PinOff);
+export const MoreActionsIcon = icon(EllipsisVertical);
+export const ScenarioIcon = icon(GitBranch);
+export const AddScenarioIcon = icon(GitBranchPlus);
+export const MainModelIcon = icon(Lock);
+export const PaywallLockIcon = icon(Lock);
+export const LocateIcon = icon(Locate);
+export const LocateOffIcon = icon(LocateOff);
+export const ControlsIcon = icon(FileCode);
+export const PatternsIcon = icon(ChartColumn);
+export const RenameIcon = icon(TextCursorInput);
+export const DuplicateIcon = icon(Copy);
+export const CopyIcon = icon(Copy);
+export const ClipboardPasteIcon = icon(ClipboardPaste);
+export const TableIcon = icon(Table);
+export const CustomAttributesIcon = icon(ListPlus);
+export const SelectPathIcon = icon(SquareDashedMousePointer);
+export const ChartLineIcon = icon(ChartLine);
+export const PipeLibraryIcon = icon(BookText);
+export const NetworkReviewIcon = icon(ListChecks);
+export const BookmarkIcon = icon(Bookmark);
+export { CustomZonesIcon as ZonesIcon } from "./custom-icons/zones-icon";
+
+export const ReverseIcon: React.FC<IconProps> = ({
+  size: rawSize = "md",
+  ...props
+}) => {
+  const pixels = getPixels(rawSize);
+
+  return (
+    <ArrowDownUp
+      size={pixels}
+      {...props}
+      style={{ transform: "rotate(90deg)", ...props.style }}
+    />
+  );
+};
+
+export const AnalysisToolsIcon: React.FC<IconProps> = ({
+  size: rawSize = "md",
+  ...props
+}) => {
+  const pixels = getPixels(rawSize);
+
+  return (
+    <ScanText
+      size={pixels}
+      {...props}
+      style={{ transform: "rotate(-90deg)", ...props.style }}
+    />
+  );
+};
+
+export { CustomUnsavedChangesIcon as UnsavedChangesIcon } from "./custom-icons/unsaved-changes-icon";
+export { CustomGithubIcon as GithubIcon } from "./custom-icons/github-icon";
+export { CustomPipeIcon as PipeIcon } from "./custom-icons/pipe-icon";
+export { CustomPumpIcon as PumpIcon } from "./custom-icons/pump-icon";
+export { CustomCurvesIcon as PumpLibraryIcon } from "./custom-icons/curves-icon";
+export { CustomTypeOffIcon as TypeOffIcon } from "./custom-icons/type-off-icon";
+export { CustomValveIcon as ValveIcon } from "./custom-icons/valve-icon";
+export { CustomPipesCrossingIcon as PipesCrossinIcon } from "./custom-icons/pipes-crossing-icon";
+export { CustomProximityCheckIcon as ProximityCheckIcon } from "./custom-icons/proximity-check-icon";
+export { CustomPanelBottomActive as PanelBottomActiveIcon } from "./custom-icons/panel-bottom-active";
+export { CustomPanelLeftActive as PanelLeftActiveIcon } from "./custom-icons/panel-left-active";
+export { CustomPanelRightActive as PanelRightActiveIcon } from "./custom-icons/panel-right-active";
+export { CustomPolygonalSelection as PolygonalSelectionIcon } from "./custom-icons/polygonal-selection";
+export { CustomOperationalDataIcon as AdvancedSettingsIcon } from "./custom-icons/operational-data";
+export { CustomTableSelectAllIcon as TableSelectAllIcon } from "./custom-icons/table-select-all-icon";
+export { CustomUpstreamTraceIcon as UpstreamTraceIcon } from "./custom-icons/trace-upstream-icon";
+export { CustomDownstreamTraceIcon as DownstreamTraceIcon } from "./custom-icons/trace-downstream-icon";
+export { CustomBoundaryTraceIcon as BoundaryTraceIcon } from "./custom-icons/trace-boundary-icon";
+export { CustomCurveLibraryIcon as CurveLibraryIcon } from "./custom-icons/curve-library-icon";
+export { CustomHglProfileIcon as HglProfileIcon } from "./custom-icons/hgl-profile-icon";
+export { CustomMissingAttributeIcon as MissingAttributeIcon } from "./custom-icons/missing-attribute-icon";
+export { CustomAllocateCustomerPointsIcon as AllocateCustomerPointsIcon } from "./custom-icons/allocate-customer-points-icon";

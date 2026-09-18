@@ -1,0 +1,829 @@
+import {
+  AckDialogAction,
+  BaseDialog,
+  LoadingDialog,
+  useDialogState,
+} from "src/components/dialog";
+import { useTranslate } from "src/hooks/use-translate";
+import { CheckoutButton } from "../components/checkout-button";
+import { Button, StyledSwitch, StyledThumb } from "../components/elements";
+import {
+  ForwardRefExoticComponent,
+  RefAttributes,
+  useMemo,
+  useState,
+} from "react";
+import { IconProps } from "@radix-ui/react-icons/dist/types";
+import { Selector } from "@epanet-js/ui-kit";
+import * as Tooltip from "@radix-ui/react-tooltip";
+import { useUserTracking } from "src/infra/user-tracking";
+import {
+  studentAccountActiviationHelpUrl,
+  teamsPlanRequestFormUrl,
+} from "src/global-config";
+import { useUnsavedChangesCheck } from "src/commands/check-unsaved-changes";
+import { useAuth } from "src/hooks/use-auth";
+import { PaymentType } from "src/hooks/use-checkout";
+import {
+  useActivateTrial,
+  useIsTrialEmailRefused,
+} from "src/hooks/use-activate-trial";
+import { usePermissions } from "src/hooks/use-permissions";
+import { signUpUrl } from "src/global-config";
+import { CheckIcon, InfoIcon, CloseIcon, RefreshIcon } from "src/icons";
+import type { UpgradeOrigin } from "src/state/dialog";
+
+type UsageOption = "commercial" | "non-commercial";
+
+const prices = {
+  pro: {
+    monthly: "$95",
+    yearly: "$950",
+  },
+  personal: {
+    yearly: "$100",
+  },
+  teams: {
+    baseMonthly: "$440",
+    baseYearly: "$4400",
+    userMonthly: "$60",
+    userYearly: "$600",
+  },
+};
+
+export const UpgradeDialog = ({
+  feature = "upgradeMenu",
+  source = "upgrade",
+}: { feature?: string; source?: UpgradeOrigin } = {}) => {
+  const { isLoaded: isAuthLoaded } = useAuth();
+  const { canUpgrade } = usePermissions();
+
+  if (!isAuthLoaded) return <LoadingDialog />;
+
+  if (!canUpgrade) {
+    return <ChangesFromSupportDialog />;
+  }
+
+  return <PlansDialog feature={feature} source={source} />;
+};
+
+const ChangesFromSupportDialog = () => {
+  const translate = useTranslate();
+  const { closeDialog } = useDialogState();
+  return (
+    <BaseDialog
+      title={translate("planChangesFromSupport")}
+      size="md"
+      isOpen={true}
+      onClose={closeDialog}
+      footer={
+        <AckDialogAction label={translate("understood")} onAck={closeDialog} />
+      }
+    >
+      <p className="p-4 text text-size-base">
+        {translate("planChangesFromSupportExplain")}
+      </p>
+    </BaseDialog>
+  );
+};
+
+const PlansDialog = ({
+  feature,
+  source,
+}: {
+  feature: string;
+  source: UpgradeOrigin;
+}) => {
+  const translate = useTranslate();
+  const [usage, setUsage] = useState<UsageOption>("commercial");
+  const [paymentType, setPaymentType] = useState<PaymentType>("yearly");
+  const [hasSeenHint, setSeenHint] = useState<boolean>(false);
+  const userTracking = useUserTracking();
+
+  const usageOptions = useMemo(
+    () => [
+      { label: translate("commercialUse"), value: "commercial" },
+      { label: translate("nonCommercialUse"), value: "non-commercial" },
+    ],
+    [translate],
+  );
+
+  const handleUsageChange = (newUsage: UsageOption) => {
+    userTracking.capture({ name: "planUsage.toggled" });
+    if (newUsage === "non-commercial") {
+      setPaymentType("yearly");
+    }
+    setSeenHint(true);
+    setUsage(newUsage);
+  };
+
+  const handlePaymentToggle = () => {
+    userTracking.capture({ name: "planPaymentType.toggled" });
+    paymentType === "yearly"
+      ? setPaymentType("monthly")
+      : setPaymentType("yearly");
+  };
+
+  const { closeDialog } = useDialogState();
+  const handleClose = () => {
+    userTracking.capture({
+      name: "upgradeDialog.dismissed",
+      source,
+      sourceFeature: feature,
+    });
+    closeDialog();
+  };
+
+  return (
+    <BaseDialog
+      title={translate("upgradeYourAccount")}
+      size="xl"
+      isOpen={true}
+      onClose={handleClose}
+    >
+      <div className="p-4">
+        <div className="flex gap-4 flex-col flex-wrap md:flex-row items-start md:items-center justify-between pb-4">
+          <div className="flex items-center gap-2">
+            <div className="text-size-base text-default">
+              {translate("for")}:
+            </div>
+            <Selector
+              options={usageOptions}
+              selected={usage}
+              onChange={(value) => handleUsageChange(value as UsageOption)}
+              ariaLabel={"usage"}
+            />
+            {usage === "commercial" && !hasSeenHint && <NonCommercialHint />}
+            {(usage !== "commercial" || hasSeenHint) && (
+              <div className="h-[48px]" />
+            )}
+          </div>
+          <div
+            className={`flex items-center gap-2 text-default ${usage === "non-commercial" ? "opacity-25" : ""}`}
+          >
+            <div className="text-size-base">{translate("monthly")}</div>
+            <StyledSwitch
+              checked={paymentType === "yearly"}
+              disabled={usage === "non-commercial"}
+              onCheckedChange={handlePaymentToggle}
+            >
+              <StyledThumb />
+            </StyledSwitch>
+            <div className="text-size-base">
+              {translate("yearlyWithDiscount", "16")}
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mx-auto">
+          <FreePlan paymentType={paymentType} />
+          {usage === "commercial" && (
+            <>
+              <ProPlan
+                paymentType={paymentType}
+                feature={feature}
+                source={source}
+              />
+              <TeamsPlan
+                paymentType={paymentType}
+                feature={feature}
+                source={source}
+              />
+            </>
+          )}
+          {usage === "non-commercial" && (
+            <>
+              <PersonalPlan
+                paymentType={paymentType}
+                feature={feature}
+                source={source}
+              />
+              <EducationPlan paymentType={paymentType} />
+            </>
+          )}
+        </div>
+      </div>
+    </BaseDialog>
+  );
+};
+
+const FreePlan = ({ paymentType }: { paymentType: PaymentType }) => {
+  const translate = useTranslate();
+  return (
+    <div className="bg-base border rounded-md shadow-md overflow-hidden flex flex-col justify-between">
+      <div className="p-6 grid max-xs:block md:flex md:flex-col grid-cols-2 gap-4 flex-1">
+        <PlanHeader
+          name="Free"
+          price="$0"
+          claim={translate("free.forEveryone")}
+          payment={paymentType}
+        />
+        <FeaturesList
+          items={[
+            {
+              feature: translate("free.webBasedEpanet"),
+              Icon: CheckIcon,
+              iconColor: "text-success",
+            },
+            {
+              feature: translate("legacyModelBuilder"),
+              Icon: CheckIcon,
+              iconColor: "text-success",
+              tooltip: translate("modelBuilderInfo"),
+            },
+            {
+              feature: translate("free.backgroundMap"),
+              Icon: CheckIcon,
+              iconColor: "text-success",
+            },
+            {
+              feature: translate("free.elevations"),
+              Icon: CheckIcon,
+              iconColor: "text-success",
+            },
+            {
+              feature: translate("free.noLimits"),
+              Icon: CheckIcon,
+              iconColor: "text-success",
+            },
+            {
+              feature: translate("free.communitySupport"),
+              Icon: CheckIcon,
+              iconColor: "text-success",
+            },
+          ]}
+        />
+      </div>
+      <div className="p-4 w-full">
+        <Button
+          size="full-width"
+          className="default-pointer bg-gray-300 text-default"
+          disabled={true}
+        >
+          <CheckIcon />
+          {translate("currentPlan")}
+        </Button>
+      </div>
+    </div>
+  );
+};
+
+const PersonalPlan = ({
+  paymentType,
+  feature,
+  source,
+}: {
+  paymentType: PaymentType;
+  feature: string;
+  source: UpgradeOrigin;
+}) => {
+  const translate = useTranslate();
+  const price = prices.personal.yearly;
+
+  return (
+    <div className="relative bg-base border border-purple-100 rounded-lg shadow-md shadow-purple-300 overflow-hidden flex flex-col justify-between">
+      <div className="p-6 grid max-xs:block md:flex md:flex-col grid-cols-2 gap-4 flex-1">
+        <div className="absolute top-0 right-0 bg-linear-to-br from-purple-300 via-purple-400 to-purple-500 text-white text-size-small font-semibold py-1 px-2 rounded-bl-lg">
+          {translate("mostPopular")}
+        </div>
+        <PlanHeader
+          name="Personal"
+          price={price}
+          claim={translate("tryItYourself")}
+          payment={paymentType}
+        />
+        <div className="flex flex-col justify-between flex-1">
+          <FeaturesList
+            title={translate("everythingAnd", "Free")}
+            items={[
+              {
+                feature: translate("scenariosItem"),
+                Icon: CheckIcon,
+                iconColor: "text-success",
+              },
+              {
+                feature: translate("proModelBuilder"),
+                Icon: CloseIcon,
+                iconColor: "text-red-500",
+                tooltip: translate("modelBuilderInfo"),
+              },
+              {
+                feature: translate("professionalSupport"),
+                Icon: CloseIcon,
+                iconColor: "text-red-500",
+              },
+              {
+                feature: translate("customAttributesItem"),
+                Icon: CheckIcon,
+                iconColor: "text-success",
+              },
+              {
+                feature: translate("customMapLayers"),
+                Icon: CheckIcon,
+                iconColor: "text-success",
+              },
+              {
+                feature: translate("customElevations"),
+                Icon: CheckIcon,
+                iconColor: "text-success",
+              },
+            ]}
+          />
+          <FeaturesList
+            title={`${translate("comingSoon")}:`}
+            textColor="text-subtle"
+            items={[
+              {
+                feature: translate("cloudStorage"),
+                Icon: CheckIcon,
+                iconColor: "text-subtle",
+              },
+              {
+                feature: translate("pointInTimeRestore", "30"),
+                Icon: CheckIcon,
+                iconColor: "text-subtle",
+              },
+              {
+                feature: translate("demandsAnalysis"),
+                Icon: CheckIcon,
+                iconColor: "text-subtle",
+              },
+            ]}
+          />
+        </div>
+      </div>
+      <div className="p-4 w-full">
+        <CheckoutButton
+          plan="personal"
+          paymentType={paymentType}
+          feature={feature}
+          source={source}
+        >
+          {translate("upgradeTo", "Personal")}
+        </CheckoutButton>
+      </div>
+    </div>
+  );
+};
+
+const EducationPlan = ({ paymentType }: { paymentType: PaymentType }) => {
+  const translate = useTranslate();
+  const checkUnsavedChanges = useUnsavedChangesCheck();
+  const { isSignedIn, signOut } = useAuth();
+  const userTracking = useUserTracking();
+
+  return (
+    <div className="relative bg-base border rounded-lg shadow-md shadow-gray-300 overflow-hidden flex flex-col h-fit">
+      <div className="p-6 grid max-xs:block md:flex md:flex-col grid-cols-2 gap-4 flex-1">
+        <PlanHeader
+          name="Education"
+          price="$0"
+          payment={paymentType}
+          claim={translate("learnWithEpanetJS")}
+        />
+        <FeaturesList
+          title={translate("everythingInForFree", "Personal")}
+          items={[]}
+        />
+      </div>
+      <div className="flex flex-col p-4 gap-y-3">
+        <div className="w-full">
+          <Button
+            size="full-width"
+            className="default-pointer bg-panel text-default"
+            onClick={() => {
+              userTracking.capture({ name: "studentLogin.clicked" });
+              checkUnsavedChanges(() => {
+                if (isSignedIn) {
+                  void signOut({ redirectUrl: signUpUrl });
+                } else {
+                  window.location.href = signUpUrl;
+                }
+              });
+            }}
+          >
+            {translate("useStudentEmail")}
+          </Button>
+        </div>
+        <div className="text-size-small text-center text-subtle">
+          <p>{translate("havingIssuesWithStudentEmail")}</p>
+          <a
+            className="text-info"
+            target="_blank"
+            href={studentAccountActiviationHelpUrl}
+            onClick={() => {
+              userTracking.capture({
+                name: "helpCenter.visited",
+                source: "educationPlan",
+              });
+            }}
+          >
+            {translate("getHelp")}.
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const ProPlan = ({
+  paymentType,
+  feature,
+  source,
+}: {
+  paymentType: PaymentType;
+  feature: string;
+  source: UpgradeOrigin;
+}) => {
+  const translate = useTranslate();
+  const price = prices.pro[paymentType];
+  const { user, isSignedIn } = useAuth();
+  const isTrialEmailRefused = useIsTrialEmailRefused();
+  const canStartTrial =
+    paymentType === "yearly" &&
+    !!isSignedIn &&
+    !user.hasUsedTrial &&
+    !isTrialEmailRefused;
+
+  return (
+    <div className="relative bg-base border border-purple-100 rounded-lg shadow-md shadow-purple-300 overflow-hidden flex flex-col justify-between">
+      <div className="p-6 grid max-xs:block md:flex md:flex-col grid-cols-2 gap-4 flex-1">
+        <div className="absolute top-0 right-0 bg-linear-to-br from-purple-300 via-purple-400 to-purple-500 text-white text-size-small font-semibold py-1 px-2 rounded-bl-lg">
+          {translate("mostPopular")}
+        </div>
+        <PlanHeader
+          name="Pro"
+          price={price}
+          payment={paymentType}
+          claim={translate("upgradeToProFor")}
+          subtitle={translate("namedLicence")}
+        />
+        <div className="flex flex-col justify-between flex-1">
+          <FeaturesList
+            title={translate("everythingAnd", "Free")}
+            items={[
+              {
+                feature: translate("scenariosItem"),
+                Icon: CheckIcon,
+                iconColor: "text-success",
+              },
+              {
+                feature: translate("proModelBuilder"),
+                Icon: CheckIcon,
+                iconColor: "text-success",
+                tooltip: translate("modelBuilderInfo"),
+              },
+              {
+                feature: translate("professionalSupport"),
+                Icon: CheckIcon,
+                iconColor: "text-success",
+              },
+              {
+                feature: translate("customAttributesItem"),
+                Icon: CheckIcon,
+                iconColor: "text-success",
+              },
+              {
+                feature: translate("customMapLayers"),
+                Icon: CheckIcon,
+                iconColor: "text-success",
+              },
+              {
+                feature: translate("customElevations"),
+                Icon: CheckIcon,
+                iconColor: "text-success",
+              },
+            ]}
+          />
+          <FeaturesList
+            title={`${translate("comingSoon")}:`}
+            textColor="text-subtle"
+            items={[
+              {
+                feature: translate("cloudStorage"),
+                Icon: CheckIcon,
+                iconColor: "text-subtle",
+              },
+              {
+                feature: translate("pointInTimeRestore", "30"),
+                Icon: CheckIcon,
+                iconColor: "text-subtle",
+              },
+              {
+                feature: translate("demandsAnalysis"),
+                Icon: CheckIcon,
+                iconColor: "text-subtle",
+              },
+            ]}
+          />
+        </div>
+      </div>
+      <div className="p-4 w-full">
+        {canStartTrial ? (
+          <StartTrialButton feature={feature} source={source} />
+        ) : (
+          <CheckoutButton
+            plan="pro"
+            paymentType={paymentType}
+            feature={feature}
+            source={source}
+          >
+            {translate("upgradeTo", "Pro")}
+          </CheckoutButton>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const StartTrialButton = ({
+  feature,
+  source,
+}: {
+  feature: string;
+  source: UpgradeOrigin;
+}) => {
+  const translate = useTranslate();
+  const userTracking = useUserTracking();
+  const { closeDialog } = useDialogState();
+  const { activateTrial, isLoading } = useActivateTrial();
+
+  const startTrial = async () => {
+    userTracking.capture({ name: "trial.clickedStart", source, feature });
+
+    const activated = await activateTrial();
+    if (!activated) return;
+
+    closeDialog();
+  };
+
+  return (
+    <Button
+      variant="primary"
+      size="full-width"
+      className="relative"
+      onClick={() => void startTrial()}
+      disabled={isLoading}
+    >
+      <span className={isLoading ? "invisible" : undefined}>
+        {translate("trial.startFree")}
+      </span>
+      {isLoading && <RefreshIcon className="animate-spin absolute" />}
+    </Button>
+  );
+};
+
+const TeamsPlan = ({
+  paymentType,
+  feature,
+  source,
+}: {
+  paymentType: PaymentType;
+  feature: string;
+  source: UpgradeOrigin;
+}) => {
+  const translate = useTranslate();
+  const userTracking = useUserTracking();
+  const basePrice =
+    paymentType === "yearly"
+      ? prices.teams.baseYearly
+      : prices.teams.baseMonthly;
+  const userPrice =
+    paymentType === "yearly"
+      ? prices.teams.userYearly
+      : prices.teams.userMonthly;
+
+  const goToTeamsRequestForm = () => {
+    userTracking.capture({ name: "teamsRequest.clicked" });
+    userTracking.capture({
+      name: "checkout.started",
+      plan: "teams",
+      paymentType,
+      source,
+      sourceFeature: feature,
+    });
+    window.open(teamsPlanRequestFormUrl, "_blank", "noopener,noreferrer");
+  };
+
+  return (
+    <div className="relative bg-base border rounded-md shadow-md shadow-gray-300 overflow-hidden flex flex-col justify-between">
+      <div className="p-6 grid max-xs:block md:flex md:flex-col grid-cols-2 gap-4 flex-1">
+        <PlanHeader
+          name="Teams"
+          payment={paymentType}
+          claim={translate("upgradeToTeamsFor")}
+          basePrice={basePrice}
+          userPrice={userPrice}
+        />
+        <div className="flex flex-col justify-between flex-1">
+          <FeaturesList
+            title={translate("everythingAnd", "Pro")}
+            items={[
+              {
+                feature: translate("prioritySupport"),
+                Icon: CheckIcon,
+                iconColor: "text-success",
+              },
+              {
+                feature: translate("selfServiceSeatManagement"),
+                Icon: CheckIcon,
+                iconColor: "text-success",
+              },
+              {
+                feature: translate("payByInvoice"),
+                Icon: CheckIcon,
+                iconColor: "text-success",
+              },
+            ]}
+          />
+          <FeaturesList
+            title={`${translate("comingSoon")}:`}
+            textColor="text-subtle"
+            items={[
+              {
+                feature: translate("teamStorage"),
+                Icon: CheckIcon,
+                iconColor: "text-subtle",
+              },
+              {
+                feature: translate("pointInTimeRestore", "90"),
+                Icon: CheckIcon,
+                iconColor: "text-subtle",
+              },
+              {
+                feature: translate("sharingModels"),
+                Icon: CheckIcon,
+                iconColor: "text-subtle",
+              },
+            ]}
+          />
+        </div>
+      </div>
+      <div className="p-4 w-full">
+        <Button
+          size="full-width"
+          className="default-pointer bg-panel text-default"
+          onClick={goToTeamsRequestForm}
+        >
+          {translate("requestQuote")}
+        </Button>
+      </div>
+    </div>
+  );
+};
+
+type PlanHeaderProps = {
+  name: string;
+  payment: PaymentType;
+  claim: string;
+} & (
+  | { price: string; subtitle?: string; basePrice?: never; userPrice?: never }
+  | { basePrice: string; userPrice: string; price?: never; subtitle?: never }
+);
+
+const PlanHeader = ({
+  name,
+  payment = "yearly",
+  claim,
+  ...props
+}: PlanHeaderProps) => {
+  const translate = useTranslate();
+  const recurrency =
+    payment === "yearly"
+      ? `/${translate("yearShort")}`
+      : `/${translate("monthShort")}`;
+
+  return (
+    <div className="flex flex-col">
+      <h2 className="text-size-heading-2 font-semibold mb-2">{name}</h2>
+      <p className="text-subtle text-size-base mb-4">{claim}</p>
+      {"basePrice" in props ? (
+        <div className="flex items-baseline gap-4">
+          <div>
+            <div className="mb-1">
+              <strong className="text-3xl font-bold">{props.basePrice}</strong>
+              <span className="text-size-base text-subtle">{recurrency}</span>
+            </div>
+            <p className="text-subtle text-size-base">
+              {translate("baseCost")}
+            </p>
+          </div>
+          <div className="flex gap-1">
+            <span className="text-size-heading-2 font-bold text-default self-start">
+              +
+            </span>
+            <div>
+              <div className="mb-1">
+                <strong className="text-size-heading-2 font-bold">
+                  {props.userPrice}
+                </strong>
+                <span className="text-size-base text-subtle">{recurrency}</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <p className="text-subtle text-size-base">
+                  {translate("perUser")}
+                </p>
+                <InfoTooltip text={translate("minimumTwoLicenses")} />
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="mb-1">
+            <strong className="text-3xl font-bold">{props.price}</strong>
+            <span className="text-size-base text-subtle">{recurrency}</span>
+          </div>
+          <p className="text-subtle text-size-base">
+            {props.subtitle ?? "\u00A0"}
+          </p>
+        </>
+      )}
+    </div>
+  );
+};
+
+type SlottableIcon =
+  | React.FC<React.ComponentProps<"svg">>
+  | ForwardRefExoticComponent<IconProps & RefAttributes<SVGSVGElement>>;
+
+export const FeaturesList = ({
+  title,
+  textColor = "text-default",
+  items,
+}: {
+  title?: string;
+  textColor?: string;
+  items: {
+    feature: string;
+    Icon: SlottableIcon;
+    iconColor: string;
+    tooltip?: string;
+  }[];
+}) => {
+  return (
+    <div className="my-4">
+      {title && <p className="text-size-base text-subtle mb-2">{title}</p>}
+      <ul className="space-y-2 grow">
+        {items.map(({ feature, Icon, iconColor, tooltip }, index) => (
+          <li
+            key={index}
+            className={`flex items-start text-size-base ${textColor}`}
+          >
+            <Icon className={`h-5 w-5 ${iconColor} shrink-0 mr-2`} />
+            <span className="flex items-center gap-1">
+              {feature}
+              {tooltip && <InfoTooltip text={tooltip} />}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+};
+
+const NonCommercialHint = () => {
+  const translate = useTranslate();
+  return (
+    <div className="hidden sm:flex relative items-center ml-4 lg:ml-6 text-subtle font-handwritten text-size-heading-2 whitespace-nowrap">
+      <svg
+        width="48"
+        height="218"
+        viewBox="0 0 48 218"
+        fill="none"
+        xmlns="http://www.w3.org/2000/svg"
+        className="rotate-70 w-8 h-12 ml-2 mr-3"
+      >
+        <path
+          fill-rule="evenodd"
+          clip-rule="evenodd"
+          d="M43.6953 0.553886C43.2025 1.04659 43.1086 1.32814 43.1086 2.64201C43.1086 3.6978 43.2729 4.54243 43.6484 5.41053C44.1412 6.63055 44.1647 6.84171 44.1412 14.8657C44.1178 23.4294 43.9535 28.0514 42.9913 45.601C41.7006 68.8753 40.668 81.0521 38.7671 95.3404C36.8193 110.075 32.6656 130.745 29.1219 143.555C26.6344 152.447 19.9696 172.765 16.9422 180.601C14.1496 187.828 9.92543 196.72 8.35309 198.691L7.88374 199.277L8.02454 196.227C8.30615 190.197 8.23576 173.727 7.93068 173.187C7.60213 172.53 6.49915 171.944 5.65432 171.944C4.66868 171.944 3.54224 173.234 3.23716 174.759C3.09635 175.463 2.86167 179.264 2.74433 183.206C2.36885 195.101 1.89949 200.849 0.749579 207.723C-0.165658 213.19 -0.21259 214.316 0.444503 215.56C1.2424 217.085 1.99337 217.554 3.87078 217.648C5.11457 217.718 5.84206 217.624 7.27359 217.132C9.69075 216.311 15.5811 213.472 22.6683 209.694C32.3839 204.509 31.9381 204.791 31.3983 204.251C30.8116 203.665 19.2655 206.527 11.1692 209.272C8.89285 210.023 6.96851 210.656 6.87464 210.656C6.80423 210.656 6.73382 210.304 6.73382 209.882C6.73382 209.295 7.08585 208.709 8.28269 207.254C14.9475 199.136 19.5706 189.165 26.6344 167.721C33.4165 147.121 35.599 138.98 39.0018 121.266C44.1412 94.6131 46.136 73.0281 47.1451 33.0957C47.3563 24.4148 47.3563 20.3793 47.1216 15.0065C46.6757 4.16704 46.2768 1.11697 45.1738 0.319265C44.4698 -0.149975 44.3524 -0.126513 43.6953 0.553886Z"
+          fill="currentColor"
+        />
+      </svg>
+      <span className="-mt-4">{translate("studentOrPersonal")}</span>
+    </div>
+  );
+};
+
+const InfoTooltip = ({ text }: { text: string }) => {
+  return (
+    <Tooltip.Root delayDuration={100}>
+      <Tooltip.Trigger asChild>
+        <button className="rounded-full hover:bg-base-hover">
+          <InfoIcon className="w-5 h-5 text-subtle" />
+        </button>
+      </Tooltip.Trigger>
+      <Tooltip.Portal>
+        <Tooltip.Content
+          className="max-w-xs text-pretty bg-gray-900 text-white text-size-base px-3 py-2 rounded-lg shadow-lg z-50"
+          side="top"
+          align="start"
+        >
+          {text}
+          <Tooltip.Arrow className="fill-gray-900" />
+        </Tooltip.Content>
+      </Tooltip.Portal>
+    </Tooltip.Root>
+  );
+};

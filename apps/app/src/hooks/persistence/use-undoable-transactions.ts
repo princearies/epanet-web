@@ -1,0 +1,206 @@
+import { useCallback } from "react";
+import { useAtomCallback } from "jotai/utils";
+import type { Getter, Setter } from "jotai";
+import {
+  stagingModelDerivedAtom,
+  momentLogDerivedAtom,
+  sessionHistoryDerivedAtom,
+} from "src/state/derived-branch-state";
+import { worktreeAtom } from "src/state/scenarios";
+import { historyPendingAtom } from "src/state/transactions";
+import {
+  applyChange,
+  applyMoment,
+  prepareHistoryAction,
+  type HistoryAction,
+} from "src/lib/persistence/transaction-helpers";
+import type { MomentLog } from "src/lib/persistence/moment-log";
+import type {
+  HistoryEntry,
+  SessionHistory,
+} from "src/lib/persistence/session-history";
+import {
+  applyChangeSetToDb,
+  applyMomentToDb,
+  buildMomentPayload,
+} from "src/lib/db";
+import type { Direction } from "@epanet-js/change-set";
+import { timedSync } from "@epanet-js/ejsdb";
+import type { WriteBatch } from "@epanet-js/ejsdb";
+import { useFeatureFlag } from "src/hooks/use-feature-flags";
+import { captureError, captureWarning } from "src/infra/error-tracking";
+import {
+  writeQueue,
+  type WriteFailureHandler,
+} from "src/lib/persistence/write-queue";
+import { useWriteFailureHandler } from "src/hooks/persistence/use-write-failure-handler";
+
+const commitHistoryAction = (
+  get: Getter,
+  set: Setter,
+  direction: "undo" | "redo",
+  action: HistoryAction,
+  momentLog: MomentLog,
+  onWriteFailure: WriteFailureHandler,
+) => {
+  const isUndo = direction === "undo";
+
+  const worktree = get(worktreeAtom);
+  const willPersist = worktree.activeBranchId === worktree.mainId;
+
+  let payload: WriteBatch | null = null;
+  if (willPersist) {
+    try {
+      payload = timedSync(
+        "moment:build",
+        () => buildMomentPayload(action.moment),
+        { direction },
+      );
+    } catch (error) {
+      captureError(error instanceof Error ? error : new Error(String(error)));
+    }
+  }
+
+  timedSync(
+    "moment:apply",
+    () =>
+      applyMoment(
+        get,
+        set,
+        action.stateId,
+        action.moment,
+        stagingModelDerivedAtom,
+      ),
+    { direction },
+  );
+
+  isUndo ? momentLog.undo() : momentLog.redo();
+
+  if (payload) {
+    writeQueue.enqueue(() => applyMomentToDb(payload), onWriteFailure);
+  }
+
+  set(momentLogDerivedAtom, momentLog);
+};
+
+const commitHistoryEntry = (
+  get: Getter,
+  set: Setter,
+  direction: "undo" | "redo",
+  entry: HistoryEntry,
+  sessionHistory: SessionHistory,
+  onWriteFailure: WriteFailureHandler,
+) => {
+  const isUndo = direction === "undo";
+  const changeDirection: Direction = isUndo ? "reverse" : "forward";
+
+  const worktree = get(worktreeAtom);
+  const willPersist = worktree.activeBranchId === worktree.mainId;
+
+  timedSync(
+    "changeSet:apply",
+    () =>
+      applyChange(
+        get,
+        set,
+        entry.stateId,
+        entry.changeSet,
+        changeDirection,
+        stagingModelDerivedAtom,
+      ),
+    { direction: changeDirection },
+  );
+
+  isUndo ? sessionHistory.undo() : sessionHistory.redo();
+
+  if (willPersist) {
+    writeQueue.enqueue(
+      () => applyChangeSetToDb(entry.changeSet, changeDirection),
+      onWriteFailure,
+    );
+  }
+
+  set(sessionHistoryDerivedAtom, sessionHistory);
+};
+
+const nextAction = (
+  momentLog: MomentLog,
+  direction: "undo" | "redo",
+): HistoryAction | null =>
+  direction === "undo" ? momentLog.nextUndo() : momentLog.nextRedo();
+
+const nextEntry = (
+  sessionHistory: SessionHistory,
+  direction: "undo" | "redo",
+): HistoryEntry | null =>
+  direction === "undo" ? sessionHistory.nextUndo() : sessionHistory.nextRedo();
+
+export const useUndoableTransactions = () => {
+  const onWriteFailure = useWriteFailureHandler();
+  const isChangeSetsOn = useFeatureFlag("FLAG_CHANGE_SETS");
+
+  const historyControl = useAtomCallback(
+    useCallback(
+      async (
+        get: Getter,
+        set: Setter,
+        direction: "undo" | "redo",
+      ): Promise<boolean> => {
+        if (get(historyPendingAtom)) return false;
+
+        if (isChangeSetsOn) {
+          const sessionHistory = get(sessionHistoryDerivedAtom).copy();
+          const entry = nextEntry(sessionHistory, direction);
+          if (!entry) return false;
+
+          set(historyPendingAtom, true);
+          try {
+            commitHistoryEntry(
+              get,
+              set,
+              direction,
+              entry,
+              sessionHistory,
+              onWriteFailure,
+            );
+            return true;
+          } finally {
+            set(historyPendingAtom, false);
+          }
+        }
+
+        const action = nextAction(get(momentLogDerivedAtom).copy(), direction);
+        if (!action) return false;
+
+        set(historyPendingAtom, true);
+        try {
+          const prepared = await prepareHistoryAction(action);
+
+          const momentLog = get(momentLogDerivedAtom).copy();
+          const pending = nextAction(momentLog, direction);
+          if (!pending || pending.stateId !== prepared.stateId) {
+            captureWarning(
+              `History ${direction} discarded: the moment log moved while preparing`,
+            );
+            return false;
+          }
+
+          commitHistoryAction(
+            get,
+            set,
+            direction,
+            prepared,
+            momentLog,
+            onWriteFailure,
+          );
+          return true;
+        } finally {
+          set(historyPendingAtom, false);
+        }
+      },
+      [onWriteFailure, isChangeSetsOn],
+    ),
+  );
+
+  return { historyControl };
+};

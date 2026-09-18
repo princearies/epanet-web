@@ -1,0 +1,480 @@
+import {
+  defaultProjectName,
+  ProjectSettings,
+} from "@epanet-js/project-settings";
+import { IssuesAccumulator, ParserIssues } from "./issues";
+import { readInpData } from "./read-inp-data";
+import { buildModel, isWgs84 } from "./build-model";
+import {
+  HydraulicModel,
+  AssetsMap,
+  type NodeAsset,
+  type LinkAsset,
+} from "src/hydraulic-model";
+import { ModelFactories, LabelManager } from "@epanet-js/hydraulic-model";
+import type { IdGenerator } from "@epanet-js/id-generator";
+import { nanoid } from "nanoid";
+import {
+  defaultTiming,
+  defaultSimulationSettings,
+  defaultWaterQualityValues,
+  defaultEnergyValues,
+  defaultReportValues,
+} from "src/simulation/simulation-settings";
+import type { SimulationSettings } from "src/simulation/simulation-settings";
+import { isUsUnitSystem } from "src/simulation/build-inp";
+import { checksum } from "src/infra/checksum";
+import { InpData, InpStats } from "./inp-data";
+import { Position } from "geojson";
+import turfDistance from "@turf/distance";
+import { convertTo, type Unit } from "@epanet-js/quantity";
+import {
+  type Projection,
+  WGS84,
+  createProjectionMapper,
+} from "@epanet-js/projections";
+import { createProjectionTransformer } from "@epanet-js/projections";
+import { computeCentroid } from "@epanet-js/projections";
+
+type SourceProjection = { id: string; name: string; code?: string };
+
+export const XY_GRID: SourceProjection = { id: "xy-grid", name: "XY Grid" };
+
+export type ParseInpOptions = {
+  customerPoints?: boolean;
+  inactiveAssets?: boolean;
+  populateAssetIndex?: boolean;
+  labelMaxLength?: number;
+  idPools?: boolean;
+};
+
+export type ParseInpResult = {
+  isMadeByApp: boolean;
+  hydraulicModel: HydraulicModel;
+  factories: ModelFactories;
+  idGenerator: IdGenerator;
+  projectSettings: ProjectSettings;
+  simulationSettings: SimulationSettings;
+  issues: ParserIssues | null;
+  stats: InpStats;
+  projectionStatus?: "wgs84" | "unknown";
+  suggestedXyScale?: number;
+};
+
+export const parseInp = (
+  inp: string,
+  options?: ParseInpOptions,
+): ParseInpResult => {
+  const issues = new IssuesAccumulator();
+  const header = parseHeader(inp);
+
+  const safeOptions: ParseInpOptions = {
+    ...options,
+    customerPoints: header.isMadeByApp ? options?.customerPoints : false,
+    inactiveAssets: header.isMadeByApp ? options?.inactiveAssets : false,
+  };
+
+  const { inpData, stats } = readInpData(inp, issues, safeOptions);
+
+  const headerProjection = header.sourceProjection;
+  const skipProjection = !headerProjection;
+
+  let projection: Projection;
+  let projectionStatus: "wgs84" | "unknown" | undefined;
+
+  if (skipProjection) {
+    projection = WGS84;
+
+    const { hydraulicModel, factories, idGenerator, projectSettings } =
+      buildModel(inpData, issues, {
+        ...safeOptions,
+        skipWgs84Validation: true,
+      });
+
+    const detection = detectProjectionStatusWithLengths(
+      hydraulicModel,
+      inpData,
+    );
+    projectionStatus = detection.status;
+
+    return {
+      isMadeByApp: header.isMadeByApp,
+      hydraulicModel,
+      factories,
+      idGenerator,
+      projectSettings: {
+        ...projectSettings,
+        name: defaultProjectName,
+        projection,
+      },
+      simulationSettings: buildSimulationSettings(
+        inpData,
+        hydraulicModel,
+        factories.labelManager,
+      ),
+      issues: issues.buildResult(),
+      stats,
+      projectionStatus,
+      suggestedXyScale: detection.suggestedXyScale,
+    };
+  }
+
+  projection = projectCoordinates(inpData, headerProjection);
+
+  const { hydraulicModel, factories, idGenerator, projectSettings } =
+    buildModel(inpData, issues, safeOptions);
+  return {
+    isMadeByApp: header.isMadeByApp,
+    hydraulicModel,
+    factories,
+    idGenerator,
+    projectSettings: {
+      ...projectSettings,
+      name: defaultProjectName,
+      projection,
+    },
+    simulationSettings: buildSimulationSettings(
+      inpData,
+      hydraulicModel,
+      factories.labelManager,
+    ),
+    issues: issues.buildResult(),
+    stats,
+  };
+};
+
+const projectCoordinates = (
+  inpData: InpData,
+  source: SourceProjection,
+): Projection => {
+  if (source.id === "wgs84") {
+    return WGS84;
+  }
+
+  if (source.id === "xy-grid") {
+    return projectXYGrid(inpData);
+  }
+
+  return projectWithCode(inpData, source);
+};
+
+const projectXYGrid = (inpData: InpData): Projection => {
+  const allPoints: Position[] = [];
+  for (const [, p] of inpData.coordinates.entries()) allPoints.push(p);
+  for (const [, verts] of inpData.vertices.entries()) allPoints.push(...verts);
+
+  const centroid = computeCentroid(allPoints);
+  const projection: Projection = {
+    type: "xy-grid",
+    id: "xy-grid",
+    name: "XY Grid",
+    centroid,
+  };
+  const mapper = createProjectionMapper(projection);
+
+  transformInpData(inpData, mapper.toWgs84);
+
+  return projection;
+};
+
+const projectWithCode = (
+  inpData: InpData,
+  source: SourceProjection,
+): Projection => {
+  const transform = createProjectionTransformer(source.code!);
+
+  transformInpData(inpData, (p) => transform(p as [number, number]));
+
+  return {
+    type: "proj4",
+    id: source.id,
+    name: source.name,
+    code: source.code!,
+  };
+};
+
+const transformInpData = (
+  inpData: InpData,
+  transform: (p: Position) => Position,
+) => {
+  for (const [id, p] of inpData.coordinates.entries()) {
+    inpData.coordinates.set(id, transform(p));
+  }
+  for (const [id, verts] of inpData.vertices.entries()) {
+    inpData.vertices.set(id, verts.map(transform));
+  }
+  for (const cp of inpData.customerPoints) {
+    cp.coordinates = transform(cp.coordinates) as [number, number];
+    if ("snapPoint" in cp && cp.snapPoint) {
+      cp.snapPoint = transform(cp.snapPoint) as [number, number];
+    }
+  }
+};
+
+type Header = { isMadeByApp: boolean; sourceProjection?: SourceProjection };
+
+const checksumRegexp = /\[([0-9A-Fa-f]{8})\]/;
+
+const parseHeader = (inp: string): Header => {
+  const newLineIndex = inp.indexOf("\n");
+  if (newLineIndex === -1) return { isMadeByApp: false };
+
+  const checksumRow = inp.substring(0, newLineIndex);
+  if (!checksumRow.includes(";MADE BY EPANET-JS"))
+    return { isMadeByApp: false };
+
+  const match = checksumRow.match(checksumRegexp);
+  if (!match) return { isMadeByApp: false };
+
+  const inputChecksum = match[1];
+  const rest = inp.substring(newLineIndex + 1);
+  const computedChecksum = checksum(rest);
+  if (inputChecksum !== computedChecksum) return { isMadeByApp: false };
+
+  const sourceProjection = parseProjectionMetadata(rest);
+
+  return { isMadeByApp: true, sourceProjection };
+};
+
+const parseProjectionMetadata = (
+  content: string,
+): SourceProjection | undefined => {
+  let id: string | undefined;
+  let name: string | undefined;
+  let code: string | undefined;
+
+  const lines = content.split("\n");
+  for (const line of lines) {
+    if (!line.startsWith(";")) break;
+
+    if (line.startsWith(";PROJECTION_TYPE ")) continue;
+    if (line.startsWith(";PROJECTION_PROJ4 ")) {
+      code = line.substring(";PROJECTION_PROJ4 ".length).trim();
+    } else if (line.startsWith(";PROJECTION_NAME ")) {
+      name = line.substring(";PROJECTION_NAME ".length).trim();
+    } else if (line.startsWith(";PROJECTION ")) {
+      id = line.substring(";PROJECTION ".length).trim();
+    }
+  }
+
+  if (id === "wgs84") return WGS84;
+  if (id === "xy-grid") return XY_GRID;
+
+  if (id && code) {
+    return { id, name: name ?? id, code };
+  }
+
+  return undefined;
+};
+
+const resolveTraceNodeId = (
+  label: string | undefined,
+  assets: AssetsMap,
+): number | null => {
+  if (!label) return null;
+  for (const asset of assets.values()) {
+    if (asset.isNode && asset.label === label) return asset.id;
+  }
+  return null;
+};
+
+const resolveEnergyPatternId = (
+  label: string | undefined,
+  labelManager: LabelManager,
+): number | null => {
+  if (!label) return null;
+  return labelManager.getIdByLabel(label, "pattern") ?? null;
+};
+
+const detectProjectionStatus = (
+  hydraulicModel: HydraulicModel,
+): "wgs84" | "unknown" => {
+  for (const asset of hydraulicModel.assets.values()) {
+    if (asset.isNode) {
+      const node = asset as NodeAsset;
+      if (!isWgs84(node.coordinates)) return "unknown";
+    } else {
+      const link = asset as LinkAsset;
+      for (const coord of link.coordinates) {
+        if (!isWgs84(coord)) return "unknown";
+      }
+    }
+  }
+  return "wgs84";
+};
+
+const lengthRatioLowerBound = 0.1;
+const lengthRatioUpperBound = 10;
+
+type ProjectionDetection = {
+  status: "wgs84" | "unknown";
+  suggestedXyScale?: number;
+};
+
+const detectProjectionStatusWithLengths = (
+  hydraulicModel: HydraulicModel,
+  inpData: InpData,
+): ProjectionDetection => {
+  const rangeStatus = detectProjectionStatus(hydraulicModel);
+  const declaredUnit: Unit = isUsUnitSystem(inpData.options.units) ? "ft" : "m";
+  const geodesicRatios: number[] = [];
+  const rawScales: number[] = [];
+
+  for (const pipe of inpData.pipes) {
+    if (!Number.isFinite(pipe.length) || pipe.length <= 0) continue;
+
+    const start = inpData.coordinates.get(pipe.startNodeDirtyId);
+    const end = inpData.coordinates.get(pipe.endNodeDirtyId);
+    if (!start || !end) continue;
+    if (start[0] === end[0] && start[1] === end[1]) continue;
+
+    const declaredMeters = convertTo(
+      { value: pipe.length, unit: declaredUnit },
+      "m",
+    );
+    if (!Number.isFinite(declaredMeters) || declaredMeters <= 0) continue;
+
+    const dx = end[0] - start[0];
+    const dy = end[1] - start[1];
+    const rawEuclidean = Math.sqrt(dx * dx + dy * dy);
+    if (rawEuclidean > 0) {
+      rawScales.push(declaredMeters / rawEuclidean);
+    }
+
+    if (rangeStatus === "wgs84") {
+      const geodesicMeters = turfDistance(start, end, { units: "meters" });
+      geodesicRatios.push(geodesicMeters / declaredMeters);
+    }
+  }
+
+  const suggestedXyScale = rawScales.length > 0 ? median(rawScales) : undefined;
+
+  if (rangeStatus === "unknown") {
+    return { status: "unknown", suggestedXyScale };
+  }
+
+  if (geodesicRatios.length === 0) {
+    return { status: "wgs84" };
+  }
+
+  const medianRatio = median(geodesicRatios);
+  if (
+    medianRatio < lengthRatioLowerBound ||
+    medianRatio > lengthRatioUpperBound
+  ) {
+    return { status: "unknown", suggestedXyScale };
+  }
+  return { status: "wgs84" };
+};
+
+const median = (values: number[]): number => {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+};
+
+const buildSimulationSettings = (
+  inpData: InpData,
+  hydraulicModel: HydraulicModel,
+  labelManager: LabelManager,
+): SimulationSettings => ({
+  version: nanoid(),
+  timing: { ...defaultTiming, ...inpData.times },
+  globalDemandMultiplier: inpData.options.demandMultiplier,
+  demandModel:
+    inpData.options.demandModel ?? defaultSimulationSettings.demandModel,
+  minimumPressure:
+    inpData.options.minimumPressure ??
+    defaultSimulationSettings.minimumPressure,
+  requiredPressure:
+    inpData.options.requiredPressure ??
+    defaultSimulationSettings.requiredPressure,
+  pressureExponent:
+    inpData.options.pressureExponent ??
+    defaultSimulationSettings.pressureExponent,
+  emitterExponent:
+    inpData.options.emitterExponent ??
+    defaultSimulationSettings.emitterExponent,
+  backflowAllowed:
+    inpData.options.backflowAllowed ??
+    defaultSimulationSettings.backflowAllowed,
+  ...(inpData.options.trials !== undefined && {
+    trials: inpData.options.trials,
+  }),
+  ...(inpData.options.accuracy !== undefined && {
+    accuracy: inpData.options.accuracy,
+  }),
+  ...(inpData.options.unbalancedMode !== undefined && {
+    unbalancedMode: inpData.options.unbalancedMode,
+  }),
+  ...(inpData.options.unbalancedExtraTrials !== undefined && {
+    unbalancedExtraTrials: inpData.options.unbalancedExtraTrials,
+  }),
+  ...(inpData.options.headError !== undefined && {
+    headError: inpData.options.headError,
+  }),
+  ...(inpData.options.flowChange !== undefined && {
+    flowChange: inpData.options.flowChange,
+  }),
+  ...(inpData.options.checkFreq !== undefined && {
+    checkFreq: inpData.options.checkFreq,
+  }),
+  ...(inpData.options.maxCheck !== undefined && {
+    maxCheck: inpData.options.maxCheck,
+  }),
+  ...(inpData.options.dampLimit !== undefined && {
+    dampLimit: inpData.options.dampLimit,
+  }),
+  ...(inpData.options.viscosity !== undefined && {
+    viscosity: inpData.options.viscosity,
+  }),
+  ...(inpData.options.specificGravity !== undefined && {
+    specificGravity: inpData.options.specificGravity,
+  }),
+  qualitySimulationType:
+    inpData.options.qualitySimulationType ??
+    defaultWaterQualityValues.qualitySimulationType,
+  qualityChemicalName:
+    inpData.options.qualityChemicalName ??
+    defaultWaterQualityValues.qualityChemicalName,
+  qualityMassUnit:
+    inpData.options.qualityMassUnit ??
+    defaultWaterQualityValues.qualityMassUnit,
+  qualityTraceNodeId: resolveTraceNodeId(
+    inpData.options.qualityTraceNode,
+    hydraulicModel.assets,
+  ),
+  tolerance: inpData.options.tolerance ?? defaultWaterQualityValues.tolerance,
+  diffusivity:
+    inpData.options.diffusivity ?? defaultWaterQualityValues.diffusivity,
+  reactionBulkOrder:
+    inpData.reactions.bulkOrder ?? defaultWaterQualityValues.reactionBulkOrder,
+  reactionWallOrder:
+    inpData.reactions.wallOrder ?? defaultWaterQualityValues.reactionWallOrder,
+  reactionTankOrder:
+    inpData.reactions.tankOrder ?? defaultWaterQualityValues.reactionTankOrder,
+  reactionGlobalBulk:
+    inpData.reactions.globalBulk ??
+    defaultWaterQualityValues.reactionGlobalBulk,
+  reactionGlobalWall:
+    inpData.reactions.globalWall ??
+    defaultWaterQualityValues.reactionGlobalWall,
+  reactionLimitingPotential:
+    inpData.reactions.limitingPotential ??
+    defaultWaterQualityValues.reactionLimitingPotential,
+  reactionRoughnessCorrelation:
+    inpData.reactions.roughnessCorrelation ??
+    defaultWaterQualityValues.reactionRoughnessCorrelation,
+  reportEnergy: inpData.report.energy ?? defaultEnergyValues.reportEnergy,
+  energyGlobalEfficiency:
+    inpData.energy.globalEfficiency ??
+    defaultEnergyValues.energyGlobalEfficiency,
+  energyGlobalPrice:
+    inpData.energy.globalPrice ?? defaultEnergyValues.energyGlobalPrice,
+  energyGlobalPatternId: resolveEnergyPatternId(
+    inpData.energy.globalPattern,
+    labelManager,
+  ),
+  energyDemandCharge:
+    inpData.energy.demandCharge ?? defaultEnergyValues.energyDemandCharge,
+  statusReport: inpData.report.statusReport ?? defaultReportValues.statusReport,
+});

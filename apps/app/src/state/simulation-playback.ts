@@ -1,0 +1,59 @@
+import { atom } from "jotai";
+import {
+  estimatedResultsFetchDurationAtom,
+  estimatedSourceRebuildDurationAtom,
+} from "src/state/performance";
+
+export type PlaybackSpeed = "auto" | "x2" | "x4";
+
+export type SimulationPlaybackState = {
+  playingAtSpeedMs: number; // 0 = not playing
+  playbackSpeed: PlaybackSpeed;
+};
+
+export const initialPlaybackState: SimulationPlaybackState = {
+  playbackSpeed: "auto",
+  playingAtSpeedMs: 0,
+};
+
+export const simulationPlaybackAtom =
+  atom<SimulationPlaybackState>(initialPlaybackState);
+
+export const isPlayingAtom = atom<boolean>(
+  (get) => get(simulationPlaybackAtom).playingAtSpeedMs !== 0,
+);
+
+export const maximumPlaybackSpeedAtom = atom<number>((get) => {
+  const fetch = get(estimatedResultsFetchDurationAtom);
+  const rebuild = get(estimatedSourceRebuildDurationAtom);
+  if (fetch === null || rebuild === null) return 1000;
+  return Math.ceil((1.2 * (fetch + rebuild)) / 50) * 50;
+});
+
+export const autoPlaybackSpeedAtom = atom<number>((get) => {
+  const maxMs = get(maximumPlaybackSpeedAtom);
+  return Math.ceil(maxMs / 1000) * 1000;
+});
+
+export function resolveSpeedByMode(
+  playbackSpeedMs: number,
+  mode: PlaybackSpeed,
+): number {
+  if (mode === "x2") return playbackSpeedMs / 2;
+  if (mode === "x4") return playbackSpeedMs / 4;
+  return playbackSpeedMs;
+}
+
+export type PlaybackWarning = "slow" | "tooFast";
+
+export const currentSpeedWarningAtom = atom<PlaybackWarning | null>((get) => {
+  const { playbackSpeed } = get(simulationPlaybackAtom);
+  const autoSpeedMs = get(autoPlaybackSpeedAtom);
+  const maxPlaybackSpeedMs = get(maximumPlaybackSpeedAtom);
+  if (playbackSpeed === "auto") {
+    return autoSpeedMs > 1000 ? "slow" : null;
+  }
+  return resolveSpeedByMode(autoSpeedMs, playbackSpeed) < maxPlaybackSpeedMs
+    ? "tooFast"
+    : null;
+});

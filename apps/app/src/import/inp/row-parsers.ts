@@ -1,0 +1,1000 @@
+import {
+  defaultAccuracy,
+  defaultUnbalanced,
+  defaultCustomersPatternId,
+} from "src/simulation/build-inp";
+import {
+  EpanetUnitSystem,
+  epanetUnitSystems,
+} from "@epanet-js/project-settings";
+import { InpData, TankData } from "./inp-data";
+import { IssuesAccumulator } from "./issues";
+import { HeadlossFormula } from "src/hydraulic-model";
+import {
+  CurveType,
+  PatternType,
+  ValveKind,
+  valveKinds,
+  PipeStatus,
+  tankMixingModels,
+  ChemicalSourceType,
+  chemicalSourceTypes,
+  headlossFormulas,
+} from "@epanet-js/hydraulic-model";
+import { ParseInpOptions } from "./parse-inp";
+import type { Position } from "geojson";
+
+export type RowParser = (params: {
+  sectionName: string;
+  trimmedRow: string;
+  isCommented: boolean;
+  inpData: InpData;
+  issues: IssuesAccumulator;
+  options?: ParseInpOptions;
+  previousComment?: string;
+}) => void;
+
+export const commentIdentifier = ";";
+
+const epanetDefaultOptions = {
+  UNITS: "CFS",
+  HEADLOSS: "H-W",
+  ACCURACY: 0.001,
+  UNBALANCED: "STOP",
+  "SPECIFIC GRAVITY": 1.0,
+  VISCOSITY: 1.0,
+  TRIALS: 40,
+  PATTERN: "1",
+  "DEMAND MULTIPLIER": 1.0,
+  "DEMAND MODEL": "DDA",
+  "MINIMUM PRESSURE": 0,
+  "REQUIRED PRESSURE": 0.1,
+  "PRESSURE EXPONENT": 0.5,
+  "EMITTER EXPONENT": 0.5,
+  "BACKFLOW ALLOWED": "YES",
+  QUALITY: "NONE",
+  DIFFUSIVITY: 1.0,
+  TOLERANCE: 0.01,
+  "TANK MIXING": "MIXED",
+  CHECKFREQ: 2,
+  MAXCHECK: 10,
+  DAMPLIMIT: 0,
+  HEADERROR: 0,
+  FLOWCHANGE: 0,
+};
+
+const defaultUnitSystem: EpanetUnitSystem = "LPS";
+
+const defaultOptions = {
+  ...epanetDefaultOptions,
+  UNITS: defaultUnitSystem,
+  ACCURACY: defaultAccuracy,
+  UNBALANCED: defaultUnbalanced,
+};
+
+const parseOptionalFloat = (input: string | undefined): number | undefined => {
+  if (input === undefined || input.trim() === "") return undefined;
+  const parsed = parseFloat(input);
+  return Number.isNaN(parsed) ? undefined : parsed;
+};
+
+const isFinitePosition = (position: Position): boolean =>
+  Number.isFinite(position[0]) && Number.isFinite(position[1]);
+
+export const ignore: RowParser = () => {};
+
+export const parseReport: RowParser = ({ trimmedRow, inpData }) => {
+  const upperRow = trimmedRow.toUpperCase();
+  if (upperRow.startsWith("ENERGY")) {
+    const value = upperRow.replace(/^ENERGY\s+/, "").trim();
+    inpData.report.energy = value === "YES";
+  }
+  if (upperRow.startsWith("STATUS")) {
+    const value = upperRow.replace(/^STATUS\s+/, "").trim();
+    if (value === "YES" || value === "NO" || value === "FULL") {
+      inpData.report.statusReport = value;
+    }
+  }
+};
+export const unsupported: RowParser = ({ sectionName, issues }) => {
+  issues.addUsedSection(sectionName);
+};
+
+export const parseSource: RowParser = ({ trimmedRow, inpData }) => {
+  const [nodeId, type, strength, patternId] = readValues(trimmedRow);
+  if (patternId) {
+    inpData.sourcePatterns.add(patternId);
+  }
+
+  const lowerType = type?.toLowerCase();
+  if (
+    !nodeId ||
+    !lowerType ||
+    !(chemicalSourceTypes as readonly string[]).includes(lowerType)
+  ) {
+    return;
+  }
+
+  inpData.sources.set(nodeId, {
+    type: lowerType as ChemicalSourceType,
+    strength: parseFloat(strength) || 0,
+    patternId: patternId || undefined,
+  });
+};
+
+const defaultEnergySettings: Record<string, number | string> = {
+  "GLOBAL EFFICIENCY": 75,
+  "GLOBAL PRICE": 0,
+  "GLOBAL PATTERN": "",
+  "DEMAND CHARGE": 0,
+};
+
+export const parseEnergy: RowParser = ({ trimmedRow, inpData }) => {
+  const upperRow = trimmedRow.toUpperCase();
+
+  if (upperRow.startsWith("PUMP")) {
+    const [, pumpId, keyword, value] = readValues(trimmedRow);
+    if (pumpId && keyword && value) {
+      const entry = inpData.energy.pumpEnergy.get(pumpId) ?? {};
+      const upperKeyword = keyword.toUpperCase();
+      if (upperKeyword.startsWith("EFFIC")) entry.efficiencyCurve = value;
+      else if (upperKeyword === "PATTERN") entry.pattern = value;
+      else if (upperKeyword === "PRICE") entry.price = parseFloat(value);
+      inpData.energy.pumpEnergy.set(pumpId, entry);
+    }
+    return;
+  }
+
+  if (upperRow.startsWith("GLOBAL EFFIC")) {
+    const rawValue = trimmedRow
+      .replace(/^GLOBAL\s+(EFFICIENCY|EFFIC)\s+/i, "")
+      .split(commentIdentifier)[0]
+      .trim();
+    const parsed = parseFloat(rawValue);
+    if (
+      !isNaN(parsed) &&
+      parsed !== defaultEnergySettings["GLOBAL EFFICIENCY"]
+    ) {
+      inpData.energy.globalEfficiency = parsed;
+    }
+    return;
+  }
+
+  const setting = readSetting(trimmedRow, defaultEnergySettings);
+  if (setting) {
+    const { name, value } = setting;
+    if (name === "GLOBAL PATTERN") {
+      inpData.energy.globalPattern = (value as string) || undefined;
+      return;
+    }
+    if (name === "GLOBAL PRICE") {
+      if (value !== undefined) inpData.energy.globalPrice = value as number;
+      return;
+    }
+    if (name === "DEMAND CHARGE") {
+      if (value !== undefined) inpData.energy.demandCharge = value as number;
+      return;
+    }
+  }
+};
+
+export const parseEmitter: RowParser = ({ trimmedRow, inpData }) => {
+  const [id, coefficient] = readValues(trimmedRow);
+  const value = parseFloat(coefficient);
+  if (!isNaN(value) && value !== 0) {
+    inpData.emitters.set(id, value);
+  }
+};
+
+export const parseMixing: RowParser = ({ trimmedRow, inpData }) => {
+  const [id, model, fraction] = readValues(trimmedRow);
+  if (!id || !model) return;
+  const normalizedModel = model.toLowerCase();
+  const isValidModel = (tankMixingModels as readonly string[]).includes(
+    normalizedModel,
+  );
+  const mixingData: { model: string; fraction?: number } = {
+    model: isValidModel ? normalizedModel : "mixed",
+  };
+  if (fraction) {
+    const value = parseFloat(fraction);
+    if (!isNaN(value)) mixingData.fraction = value;
+  }
+  inpData.mixing.set(id, mixingData);
+};
+
+export const parseQuality: RowParser = ({ trimmedRow, inpData }) => {
+  const [id, initialQuality] = readValues(trimmedRow);
+  const value = parseFloat(initialQuality);
+  if (!isNaN(value) && value !== 0) {
+    inpData.quality.set(id, value);
+  }
+};
+
+const defaultReactionSettings: Record<string, number> = {
+  "ORDER BULK": 1,
+  "ORDER TANK": 1,
+  "ORDER WALL": 1,
+  "GLOBAL BULK": 0,
+  "GLOBAL WALL": 0,
+  "LIMITING POTENTIAL": 0,
+  "ROUGHNESS CORRELATION": 0,
+};
+
+export const parseReaction: RowParser = ({
+  sectionName,
+  trimmedRow,
+  inpData,
+  issues,
+}) => {
+  const setting = readSetting(trimmedRow, defaultReactionSettings);
+
+  if (setting) {
+    const { name, value } = setting;
+    if (name === "ORDER BULK") {
+      if (value !== undefined) inpData.reactions.bulkOrder = value as number;
+      return;
+    }
+    if (name === "ORDER WALL") {
+      if (value !== undefined) inpData.reactions.wallOrder = value as number;
+      return;
+    }
+    if (name === "ORDER TANK") {
+      if (value !== undefined) inpData.reactions.tankOrder = value as number;
+      return;
+    }
+    if (name === "GLOBAL BULK") {
+      if (value !== undefined) inpData.reactions.globalBulk = value as number;
+      return;
+    }
+    if (name === "GLOBAL WALL") {
+      if (value !== undefined) inpData.reactions.globalWall = value as number;
+      return;
+    }
+    if (name === "LIMITING POTENTIAL") {
+      if (value !== undefined)
+        inpData.reactions.limitingPotential = value as number;
+      return;
+    }
+    if (name === "ROUGHNESS CORRELATION") {
+      if (value !== undefined)
+        inpData.reactions.roughnessCorrelation = value as number;
+      return;
+    }
+  }
+
+  if (!setting) {
+    // Per-pipe BULK/WALL and per-tank TANK rows: "BULK pipeId value", "WALL pipeId value", "TANK tankId value"
+    const [keyword, id, valueStr] = readValues(trimmedRow);
+    const upperKeyword = keyword?.toUpperCase();
+    if (
+      upperKeyword === "BULK" ||
+      upperKeyword === "WALL" ||
+      upperKeyword === "TANK"
+    ) {
+      const value = parseFloat(valueStr);
+      if (!id || isNaN(value)) return;
+      if (upperKeyword === "BULK") {
+        inpData.reactions.pipeBulk.set(id, value);
+      } else if (upperKeyword === "WALL") {
+        inpData.reactions.pipeWall.set(id, value);
+      } else if (upperKeyword === "TANK") {
+        inpData.reactions.tankBulk.set(id, value);
+      }
+      return;
+    }
+    issues.addUsedSection(sectionName);
+  }
+};
+
+export const parseReservoir: RowParser = ({
+  trimmedRow,
+  inpData,
+  isCommented,
+}) => {
+  const [id, baseHead, patternId] = readValues(trimmedRow);
+
+  const comment = readComment(trimmedRow);
+  const elevationMatch = comment.match(/Elevation:(-?\d+(?:\.\d+)?)/i);
+  const parsedElevation = elevationMatch ? parseFloat(elevationMatch[1]) : NaN;
+  const elevation = !isNaN(parsedElevation) ? parsedElevation : undefined;
+
+  inpData.reservoirs.push({
+    id,
+    baseHead: parseFloat(baseHead),
+    patternId,
+    elevation,
+    isActive: !isCommented,
+  });
+  inpData.nodeIds.add(id);
+};
+
+export const parseJunction: RowParser = ({
+  trimmedRow,
+  inpData,
+  isCommented,
+}) => {
+  const [id, elevation, baseDemand, patternId] = readValues(trimmedRow);
+
+  const junctionData = {
+    id,
+    elevation: parseFloat(elevation),
+    baseDemand: baseDemand ? parseFloat(baseDemand) : undefined,
+    patternId: patternId ? patternId : undefined,
+    isActive: !isCommented,
+  };
+  inpData.junctions.push(junctionData);
+
+  inpData.nodeIds.add(id);
+};
+
+export const parseValve: RowParser = ({
+  trimmedRow,
+  inpData,
+  issues,
+  isCommented,
+}) => {
+  const [
+    id,
+    startNodeDirtyId,
+    endNodeDirtyId,
+    diameter,
+    type,
+    setting,
+    minorLoss,
+    curveId,
+  ] = readValues(trimmedRow);
+
+  const rawKind = type?.toLowerCase();
+  const isValidKind =
+    rawKind !== undefined &&
+    (valveKinds as readonly string[]).includes(rawKind);
+  if (!isValidKind) {
+    issues.addInvalidValveKind(id, type ?? "");
+  }
+  const kind: ValveKind = isValidKind ? (rawKind as ValveKind) : "tcv";
+
+  let valveCurveId: string | undefined;
+  if (kind === "gpv") {
+    valveCurveId = setting;
+  }
+
+  if (kind === "pcv" && curveId) {
+    valveCurveId = curveId;
+  }
+
+  inpData.valves.push({
+    id,
+    startNodeDirtyId,
+    endNodeDirtyId,
+    diameter: parseFloat(diameter),
+    kind,
+    setting: parseFloat(setting),
+    minorLoss: parseOptionalFloat(minorLoss),
+    curveId: valveCurveId,
+    isActive: !isCommented,
+  });
+};
+
+export const parsePump: RowParser = ({ trimmedRow, inpData, isCommented }) => {
+  const [id, startNodeDirtyId, endNodeDirtyId, ...settingFields] =
+    readValues(trimmedRow);
+
+  let power = undefined;
+  let curveId = undefined;
+  let speed = undefined;
+  let patternId = undefined;
+
+  for (let i = 0; i < settingFields.length; i += 2) {
+    const key = settingFields[i].toUpperCase();
+    const value = settingFields[i + 1];
+    if (key === "POWER") {
+      power = parseFloat(value);
+    }
+
+    if (key === "HEAD") {
+      curveId = value;
+    }
+
+    if (key === "SPEED") {
+      speed = parseFloat(value);
+    }
+
+    if (key === "PATTERN") {
+      patternId = value;
+    }
+  }
+
+  inpData.pumps.push({
+    id,
+    startNodeDirtyId,
+    endNodeDirtyId,
+    power,
+    curveId,
+    speed,
+    patternId,
+    isActive: !isCommented,
+  });
+};
+
+export const parseCurve: RowParser = ({
+  trimmedRow,
+  inpData,
+  previousComment,
+}) => {
+  const [curveId, x, y] = readValues(trimmedRow);
+  const normalizedLabel = curveId.toUpperCase();
+  const existing = inpData.curves.get(normalizedLabel);
+  const points = existing?.points || [];
+  const parsedX = parseFloat(x);
+  const parsedY = parseFloat(y);
+  if (Number.isFinite(parsedX) && Number.isFinite(parsedY)) {
+    points.push({ x: parsedX, y: parsedY });
+  }
+  const fallbackType = existing
+    ? existing.fallbackType
+    : detectCurveTypeFromComment(previousComment);
+  inpData.curves.set(normalizedLabel, { label: curveId, points, fallbackType });
+};
+
+export const parseStatus: RowParser = ({ trimmedRow, inpData }) => {
+  const [linkId, value] = readValues(trimmedRow);
+  inpData.status.set(linkId, value.toUpperCase());
+};
+
+export const parseTank: RowParser = ({ trimmedRow, inpData, isCommented }) => {
+  const [
+    id,
+    elevation,
+    initialLevel,
+    minLevel,
+    maxLevel,
+    diameter,
+    minVolume,
+    volumeCurveId,
+    overflow,
+  ] = readValues(trimmedRow);
+
+  const tankData: TankData = {
+    id,
+    elevation: parseFloat(elevation),
+    initialLevel: parseFloat(initialLevel),
+    minLevel: parseFloat(minLevel),
+    maxLevel: parseFloat(maxLevel),
+    diameter: parseFloat(diameter),
+    minVolume: parseOptionalFloat(minVolume),
+    isActive: !isCommented,
+  };
+
+  if (volumeCurveId && volumeCurveId !== "*") {
+    tankData.volumeCurveId = volumeCurveId;
+  }
+
+  if (overflow) {
+    tankData.overflow = overflow.toUpperCase() === "YES";
+  }
+
+  inpData.tanks.push(tankData);
+  inpData.nodeIds.add(id);
+};
+
+export const parsePipe: RowParser = ({ trimmedRow, inpData, isCommented }) => {
+  const [
+    id,
+    startNodeDirtyId,
+    endNodeDirtyId,
+    length,
+    diameter,
+    roughness,
+    minorLoss,
+    status,
+  ] = readValues(trimmedRow);
+
+  let initialStatus: PipeStatus = "open";
+  if (status) {
+    const statusLower = status.toLowerCase();
+    if (statusLower === "closed") {
+      initialStatus = "closed";
+    } else if (statusLower === "cv") {
+      initialStatus = "cv";
+    }
+  }
+
+  inpData.pipes.push({
+    id,
+    startNodeDirtyId,
+    endNodeDirtyId,
+    length: parseFloat(length),
+    diameter: parseFloat(diameter),
+    roughness: parseOptionalFloat(roughness),
+    minorLoss: parseOptionalFloat(minorLoss),
+    initialStatus,
+    isActive: !isCommented,
+  });
+};
+
+export const parseDemand: RowParser = ({ trimmedRow, inpData }) => {
+  const [nodeId, baseDemand, patternId] = readValues(trimmedRow);
+  const comment = readComment(trimmedRow);
+
+  if (
+    patternId === defaultCustomersPatternId ||
+    comment.includes(defaultCustomersPatternId)
+  ) {
+    return;
+  }
+
+  const demands = inpData.demands.get(nodeId) || [];
+  demands.push({
+    baseDemand: parseFloat(baseDemand),
+    patternLabel: patternId,
+  });
+  inpData.demands.set(nodeId, demands);
+};
+
+export const parsePosition: RowParser = ({ trimmedRow, inpData, issues }) => {
+  const [nodeId, lng, lat] = readValues(trimmedRow);
+  const position: Position = [parseFloat(lng), parseFloat(lat)];
+  if (!isFinitePosition(position)) {
+    issues.addMalformedCoordinates(nodeId);
+  }
+  inpData.coordinates.set(nodeId, position);
+};
+
+export const parsePattern: RowParser = ({
+  trimmedRow,
+  inpData,
+  previousComment,
+}) => {
+  const [patternId, ...values] = readValues(trimmedRow);
+  const normalizedLabel = patternId.toUpperCase();
+  const existing = inpData.patterns.get(normalizedLabel);
+  const multipliers = existing?.multipliers || [];
+  multipliers.push(
+    ...values.map((v) => parseFloat(v)).filter((n) => Number.isFinite(n)),
+  );
+  const fallbackType = existing
+    ? existing.fallbackType
+    : detectPatternTypeFromComment(previousComment);
+  inpData.patterns.set(normalizedLabel, {
+    label: patternId,
+    multipliers,
+    fallbackType,
+  });
+};
+
+export const parseVertex: RowParser = ({ trimmedRow, inpData, issues }) => {
+  const [linkId, lng, lat] = readValues(trimmedRow);
+  const position: Position = [parseFloat(lng), parseFloat(lat)];
+  if (!isFinitePosition(position)) {
+    issues.addMalformedVertices(linkId);
+  }
+  const vertices = inpData.vertices.get(linkId) || [];
+  vertices.push(position);
+  inpData.vertices.set(linkId, vertices);
+};
+
+const defaultTimeSettings = {
+  DURATION: "0",
+  "HYDRAULIC TIMESTEP": "0",
+  "REPORT TIMESTEP": "0",
+  "PATTERN TIMESTEP": "0",
+  "QUALITY TIMESTEP": "0",
+  "RULE TIMESTEP": "0",
+  "PATTERN START": "0",
+  "REPORT START": "0",
+  "START CLOCKTIME": "0",
+  STATISTIC: "NONE",
+};
+
+const parseTimeToSeconds = (timeStr: string): number => {
+  const trimmed = timeStr.trim().toUpperCase();
+
+  if (trimmed.includes(":")) {
+    const parts = trimmed.split(":");
+    if (parts.length === 2) {
+      const hours = parseInt(parts[0], 10) || 0;
+      const minutes = parseInt(parts[1], 10) || 0;
+      return hours * 3600 + minutes * 60;
+    }
+    if (parts.length === 3) {
+      const hours = parseInt(parts[0], 10) || 0;
+      const minutes = parseInt(parts[1], 10) || 0;
+      const seconds = parseInt(parts[2], 10) || 0;
+      return hours * 3600 + minutes * 60 + seconds;
+    }
+  }
+
+  const numericMatch = trimmed.match(/^(\d+(?:\.\d+)?)\s*(.*)$/);
+  if (numericMatch) {
+    const value = parseFloat(numericMatch[1]);
+    const unit = numericMatch[2];
+
+    if (unit.startsWith("SEC") || unit === "S") return value;
+    if (unit.startsWith("MIN") || unit === "M") return value * 60;
+    if (unit.startsWith("HOUR") || unit === "H" || unit === "HR")
+      return value * 3600;
+    if (unit.startsWith("DAY") || unit === "D") return value * 86400;
+
+    return value * 3600;
+  }
+
+  return 0;
+};
+
+const parseClocktimeToSeconds = (timeStr: string): number => {
+  const trimmed = timeStr.trim().toUpperCase();
+
+  const isPM = trimmed.includes("PM");
+  const isAM = trimmed.includes("AM");
+  const timeOnly = trimmed.replace(/\s*(AM|PM)\s*$/i, "").trim();
+
+  let hours = 0;
+  let minutes = 0;
+
+  if (timeOnly.includes(":")) {
+    const parts = timeOnly.split(":");
+    hours = parseInt(parts[0], 10) || 0;
+    minutes = parseInt(parts[1], 10) || 0;
+  } else {
+    hours = parseInt(timeOnly, 10) || 0;
+  }
+
+  if (isAM || isPM) {
+    if (hours === 12) {
+      hours = isPM ? 12 : 0;
+    } else if (isPM) {
+      hours += 12;
+    }
+  }
+
+  return hours * 3600 + minutes * 60;
+};
+
+export const parseTimeSetting: RowParser = ({
+  trimmedRow,
+  inpData,
+  issues,
+}) => {
+  const setting = readSetting(trimmedRow, defaultTimeSettings);
+  if (!setting) return;
+
+  const { name, value, defaultValue } = setting as {
+    name: string;
+    value: string;
+    defaultValue: string;
+  };
+
+  if (name === "DURATION") {
+    inpData.times.duration = parseTimeToSeconds(value);
+  }
+  if (name === "HYDRAULIC TIMESTEP") {
+    const seconds = parseTimeToSeconds(value);
+    if (seconds > 0) inpData.times.hydraulicTimestep = seconds;
+  }
+  if (name === "REPORT TIMESTEP") {
+    const seconds = parseTimeToSeconds(value);
+    if (seconds > 0) inpData.times.reportTimestep = seconds;
+  }
+  if (name === "PATTERN TIMESTEP") {
+    const seconds = parseTimeToSeconds(value);
+    if (seconds > 0) inpData.times.patternTimestep = seconds;
+  }
+  if (name === "QUALITY TIMESTEP") {
+    inpData.times.qualityTimestep = parseTimeToSeconds(value);
+  }
+  if (name === "RULE TIMESTEP") {
+    inpData.times.ruleTimestep = parseTimeToSeconds(value);
+  }
+  if (name === "PATTERN START") {
+    inpData.times.patternStart = parseTimeToSeconds(value);
+  }
+  if (name === "REPORT START") {
+    inpData.times.reportStart = parseTimeToSeconds(value);
+  }
+  if (name === "START CLOCKTIME") {
+    inpData.times.startClocktime = parseClocktimeToSeconds(value);
+  }
+  if (name === "STATISTIC") {
+    inpData.times.statistic = value;
+  }
+
+  if (name === "PATTERN START" && inpData.times.patternStart !== 0) {
+    issues.addUsedTimeSetting(name, defaultValue);
+  }
+  if (name === "REPORT START" && inpData.times.reportStart !== 0) {
+    issues.addUsedTimeSetting(name, defaultValue);
+  }
+  if (name === "START CLOCKTIME" && inpData.times.startClocktime !== 0) {
+    issues.addUsedTimeSetting(name, defaultValue);
+  }
+  if (name === "STATISTIC" && inpData.times.statistic !== defaultValue) {
+    issues.addUsedTimeSetting(name, defaultValue);
+  }
+};
+
+const epanetToUnit: Record<string, string> = {
+  PSI: "psi",
+  KPA: "kPa",
+  METERS: "mwc",
+  FEET: "fwc",
+  BAR: "bar",
+};
+
+const parsePressureUnit = (row: string): string | undefined => {
+  const upper = row.split(commentIdentifier)[0].toUpperCase().trim();
+  const match = upper.match(/^PRESSURE\s+(PSI|KPA|METERS|FEET|BAR)$/);
+  if (!match) return undefined;
+  return epanetToUnit[match[1]];
+};
+
+export const parseOption: RowParser = ({
+  trimmedRow,
+  inpData,
+  issues,
+}): void => {
+  const pressureUnit = parsePressureUnit(trimmedRow);
+  if (pressureUnit) {
+    inpData.options.pressureUnit = pressureUnit;
+    return;
+  }
+
+  const option = readSetting(trimmedRow, defaultOptions);
+  if (!option) return;
+
+  const { name, value, defaultValue } = option;
+
+  if (name === "UNITS") {
+    if (typeof value !== "string" || value === "") return;
+
+    if ((epanetUnitSystems as readonly string[]).includes(value)) {
+      inpData.options.units = value as EpanetUnitSystem;
+    } else {
+      inpData.options.units = defaultUnitSystem;
+      issues.addUsedOption(name, defaultUnitSystem);
+    }
+    return;
+  }
+
+  if (name === "HEADLOSS") {
+    if (
+      typeof value === "string" &&
+      (headlossFormulas as readonly string[]).includes(value)
+    ) {
+      inpData.options.headlossFormula = value as HeadlossFormula;
+    } else {
+      inpData.options.headlossFormula = "H-W";
+      issues.addUsedOption(name, "H-W");
+    }
+    return;
+  }
+
+  if (name === "UNBALANCED") {
+    const strValue = typeof value === "string" ? value : String(value);
+    const parts = strValue.trim().split(/\s+/);
+    const mode = parts[0] as "STOP" | "CONTINUE";
+    inpData.options.unbalancedMode = mode;
+    if (mode === "CONTINUE" && parts.length > 1) {
+      const extraTrials = parseInt(parts[1], 10);
+      inpData.options.unbalancedExtraTrials = Number.isNaN(extraTrials)
+        ? 0
+        : extraTrials;
+    } else if (mode === "CONTINUE") {
+      inpData.options.unbalancedExtraTrials = 0;
+    }
+    return;
+  }
+
+  if (name === "DEMAND MULTIPLIER") {
+    if (value !== undefined) inpData.options.demandMultiplier = value as number;
+    return;
+  }
+
+  if (name === "DEMAND MODEL") {
+    inpData.options.demandModel = value as "DDA" | "PDA";
+    return;
+  }
+
+  if (name === "MINIMUM PRESSURE") {
+    if (value !== undefined) inpData.options.minimumPressure = value as number;
+    return;
+  }
+
+  if (name === "REQUIRED PRESSURE") {
+    if (value !== undefined) inpData.options.requiredPressure = value as number;
+    return;
+  }
+
+  if (name === "PRESSURE EXPONENT") {
+    if (value !== undefined) inpData.options.pressureExponent = value as number;
+    return;
+  }
+
+  if (name === "EMITTER EXPONENT") {
+    if (value !== undefined) inpData.options.emitterExponent = value as number;
+    return;
+  }
+
+  if (name === "BACKFLOW ALLOWED") {
+    const upperValue = (value as string).toUpperCase();
+    inpData.options.backflowAllowed = upperValue === "YES";
+    return;
+  }
+
+  if (name === "PATTERN") {
+    inpData.options.defaultPattern = value as string;
+    return;
+  }
+
+  if (name === "QUALITY") {
+    const upperValue =
+      typeof value === "string" ? value.toUpperCase() : String(value);
+
+    if (upperValue.startsWith("NONE")) {
+      inpData.options.qualitySimulationType = "none";
+    } else if (upperValue.startsWith("AGE")) {
+      inpData.options.qualitySimulationType = "age";
+    } else if (upperValue.startsWith("TRACE")) {
+      inpData.options.qualitySimulationType = "trace";
+      const rawValue = trimmedRow
+        .split(commentIdentifier)[0]
+        .replace(/^\s*QUALITY\s+TRACE\s+/i, "")
+        .trim();
+      if (rawValue) inpData.options.qualityTraceNode = rawValue;
+    } else {
+      inpData.options.qualitySimulationType = "chemical";
+      const rawValue = trimmedRow
+        .split(commentIdentifier)[0]
+        .replace(/^\s*QUALITY\s+/i, "")
+        .trim();
+      const parts = rawValue.split(/\s+/);
+      if (parts[0] && parts[0].toLowerCase() !== "chemical")
+        inpData.options.qualityChemicalName = parts[0];
+      if (parts[1]) {
+        const unit = parts[1].toLowerCase();
+        inpData.options.qualityMassUnit = unit === "ug/l" ? "ug/L" : "mg/L";
+      }
+    }
+    return;
+  }
+
+  if (name === "TRIALS") {
+    if (value !== undefined) inpData.options.trials = value as number;
+    return;
+  }
+  if (name === "ACCURACY") {
+    if (value !== undefined) inpData.options.accuracy = value as number;
+    return;
+  }
+  if (name === "HEADERROR") {
+    if (value !== undefined) inpData.options.headError = value as number;
+    return;
+  }
+  if (name === "FLOWCHANGE") {
+    if (value !== undefined) inpData.options.flowChange = value as number;
+    return;
+  }
+  if (name === "CHECKFREQ") {
+    if (value !== undefined) inpData.options.checkFreq = value as number;
+    return;
+  }
+  if (name === "MAXCHECK") {
+    if (value !== undefined) inpData.options.maxCheck = value as number;
+    return;
+  }
+  if (name === "DAMPLIMIT") {
+    if (value !== undefined) inpData.options.dampLimit = value as number;
+    return;
+  }
+  if (name === "VISCOSITY") {
+    if (value !== undefined) inpData.options.viscosity = value as number;
+    return;
+  }
+  if (name === "SPECIFIC GRAVITY") {
+    if (value !== undefined) inpData.options.specificGravity = value as number;
+    return;
+  }
+  if (name === "TOLERANCE") {
+    if (value !== undefined) inpData.options.tolerance = value as number;
+    return;
+  }
+  if (name === "DIFFUSIVITY") {
+    if (value !== undefined) inpData.options.diffusivity = value as number;
+    return;
+  }
+
+  if (defaultValue !== value) {
+    issues.addUsedOption(name, defaultValue);
+  }
+};
+
+const readValues = (row: string): string[] => {
+  const rowWithoutComments = row.split(commentIdentifier)[0];
+  return rowWithoutComments.split(/\s+/).map((s) => s.trim());
+};
+
+const readComment = (row: string): string => {
+  const comment = row.split(commentIdentifier)?.[1];
+  return comment ? comment.trim() : "";
+};
+
+const readSetting = <T extends Record<string, string | number>>(
+  trimmedRow: string,
+  settings: T,
+):
+  | { name: string; value: number | undefined; defaultValue: number }
+  | { name: string; value: string; defaultValue: string }
+  | null => {
+  const rowWithoutComments = trimmedRow.split(commentIdentifier)[0];
+  const upperCaseRow = rowWithoutComments.toUpperCase();
+  const name = Object.keys(settings).find((name) =>
+    upperCaseRow.startsWith(name),
+  );
+
+  if (!name) return null;
+  const value = upperCaseRow.replace(new RegExp(`^${name}\\s*`), "").trim();
+
+  const defaultValue = settings[name];
+  if (typeof defaultValue === "number") {
+    return { name, value: parseOptionalFloat(value), defaultValue };
+  } else {
+    return { name, value, defaultValue };
+  }
+};
+
+export const parseControl: RowParser = ({ trimmedRow, inpData }) => {
+  if (inpData.controls.simple) {
+    inpData.controls.simple += "\n" + trimmedRow;
+  } else {
+    inpData.controls.simple = trimmedRow;
+  }
+};
+
+export const parseRule: RowParser = ({ trimmedRow, inpData }) => {
+  if (inpData.controls.ruleBased) {
+    inpData.controls.ruleBased += "\n" + trimmedRow;
+  } else {
+    inpData.controls.ruleBased = trimmedRow;
+  }
+};
+
+const CURVE_KEYWORDS: Record<string, CurveType> = {
+  PUMP: "pump",
+  EFFICIENCY: "efficiency",
+  VOLUME: "volume",
+  HEADLOSS: "headloss",
+  VALVE: "valve",
+};
+
+const PATTERN_KEYWORDS: Record<string, PatternType> = {
+  DEMAND: "demand",
+  RESERVOIR: "reservoirHead",
+  SPEED: "pumpSpeed",
+  ENERGY_PRICE: "energyPrice",
+};
+
+const countKeywordMatches = <T>(
+  comment: string,
+  keywords: Record<string, T>,
+): T | undefined => {
+  const words = comment
+    .toUpperCase()
+    .split(/[^A-Z]+/)
+    .filter(Boolean);
+  const matches = words.filter((w) => w in keywords);
+  return matches.length === 1 ? keywords[matches[0]] : undefined;
+};
+
+const detectCurveTypeFromComment = (
+  comment: string | undefined,
+): CurveType | undefined => {
+  if (!comment) return undefined;
+  return countKeywordMatches(comment, CURVE_KEYWORDS);
+};
+
+const detectPatternTypeFromComment = (
+  comment: string | undefined,
+): PatternType | undefined => {
+  if (!comment) return undefined;
+  return countKeywordMatches(comment, PATTERN_KEYWORDS);
+};

@@ -1,0 +1,2015 @@
+import { PostHogProvider, usePostHog } from "posthog-js/react";
+import { useCallback, useMemo } from "react";
+import { Asset, HeadlossFormula } from "src/hydraulic-model";
+import type { Control } from "@epanet-js/hydraulic-model";
+import type {
+  CustomAttributeAssetType,
+  CustomAttributeType,
+} from "@epanet-js/hydraulic-model";
+import { isDebugOn } from "./debug-mode";
+import { MODE_INFO } from "src/state/mode";
+import { SimulationState } from "src/state/simulation";
+import { Presets } from "@epanet-js/project-settings";
+import { EpanetUnitSystem } from "src/simulation/build-inp";
+import { User } from "src/auth-types";
+import type {
+  PaywallFeature,
+  SimulationSummaryState,
+  UpgradeOrigin,
+} from "src/state/dialog";
+import type { PlaybackSpeed } from "src/state/simulation-playback";
+import type { CollectionDraftSource } from "src/lib/collections";
+import type { ConverterVendor } from "src/lib/converters";
+import { usePrivacySettings } from "src/hooks/use-privacy-settings";
+import type { QualitySimulationType } from "src/simulation/simulation-settings";
+
+type Metadata = {
+  [key: string]: boolean | string | number | string[];
+};
+
+export const trackUserAction = (event: string, metadata: Metadata = {}) => {
+  if (process.env.NEXT_PUBLIC_SKIP_USER_TRACKING === "true") return;
+
+  // eslint-disable-next-line no-console
+  console.log(`USER_TRACKING: ${event}`, metadata);
+};
+
+const getApiHost = (): string => {
+  if (typeof window === "undefined")
+    return process.env.NEXT_PUBLIC_POSTHOG_HOST as string;
+
+  const isProxyEnabled = process.env.NEXT_PUBLIC_POSTHOG_PROXY === "true";
+
+  return isProxyEnabled
+    ? `${window.location.origin}/i`
+    : (process.env.NEXT_PUBLIC_POSTHOG_HOST as string);
+};
+
+const apiKey = process.env.NEXT_PUBLIC_POSTHOG_KEY as string;
+const options = {
+  api_host: getApiHost(),
+};
+
+export const isPosthogConfigured = !!apiKey;
+
+export const UserTrackingProvider = ({
+  children,
+}: {
+  children: React.ReactNode;
+}) => {
+  if (!isPosthogConfigured) return children as JSX.Element;
+
+  return (
+    <PostHogProvider apiKey={apiKey} options={options}>
+      {children}
+    </PostHogProvider>
+  );
+};
+
+type AssetCreated = {
+  name: "asset.created";
+  type: Asset["type"];
+};
+
+type AssetRedrawed = {
+  name: "asset.redrawed";
+  type: Asset["type"];
+};
+
+type AssetRedrawStarted = {
+  name: "asset.redrawStarted";
+  source: "context-menu" | "toolbar" | "shortcut";
+  type: Asset["type"];
+};
+
+type LinkReversed = {
+  name: "link.reversed";
+  source: "context-menu" | "toolbar" | "shortcut";
+  type: Asset["type"];
+};
+
+type AssetPropertyEdited = {
+  name: "assetProperty.edited";
+  type: Asset["type"];
+  property: string;
+  newValue: number | string | null;
+  oldValue: number | string | null;
+};
+
+type AssetControlChanged = {
+  name: "assetControl.changed";
+  type: Asset["type"];
+  controlType: Control["type"];
+  previousType: Control["type"] | null;
+  stepsCount?: number;
+};
+
+type AssetControlRemoved = {
+  name: "assetControl.removed";
+  type: Asset["type"];
+  previousType: Control["type"] | null;
+  stepsCount?: number;
+};
+
+type AssetPropertyBatchEdited = {
+  name: "assetProperty.batchEdited";
+  type: Asset["type"];
+  property: string;
+  newValue: number | string | null;
+  count: number;
+};
+
+type AssetPropertiesEdited = {
+  name: "assetProperties.edited";
+  type: Asset["type"];
+  properties: string[];
+};
+
+type CustomAttributeEdited = {
+  name: "customAttribute.edited";
+  assetType: CustomAttributeAssetType;
+  attributeType: CustomAttributeType;
+  property: string;
+  label: string;
+};
+
+type CustomAttributeBatchEdited = {
+  name: "customAttribute.batchEdited";
+  assetType: CustomAttributeAssetType;
+  attributeType: CustomAttributeType;
+  property: string;
+  label: string;
+  count: number;
+};
+
+type AssetStatusEdited = {
+  name: "assetStatus.edited";
+  type: Asset["type"];
+  property: string;
+  newStatus: string | null;
+  oldStatus: string | null;
+};
+
+type AssetDefinitionTypeEdited = {
+  name: "assetDefinitionType.edited";
+  type: Asset["type"];
+  property: string;
+  newType: string | null;
+  oldType?: string | null;
+};
+
+type PumpCurveEdited = {
+  name: "pumpType.edited";
+  definitionType: string;
+  pointsCount: number;
+};
+
+type AssetSelected = {
+  name: "asset.selected";
+  type: Asset["type"];
+};
+
+type MultiSelectUpdated = {
+  name: "multiSelect.updated";
+  count: number;
+  operation:
+    | "bulk_add"
+    | "bulk_remove"
+    | "new"
+    | "single_add"
+    | "single_remove";
+};
+
+type SelectionNarrowedToAssetType = {
+  name: "selection.narrowedToAssetType";
+  type: Asset["type"] | "customerPoint";
+  count: number;
+};
+
+type SelectionNarrowedToPropertyValue = {
+  name: "selection.narrowedToPropertyValue";
+  type: Asset["type"] | "customerPoint";
+  property: string;
+  count: number;
+};
+
+type FullSelectionEnabled = {
+  name: "fullSelection.enabled";
+  source: "shortcut";
+  count: number;
+};
+
+type SelectionCleared = {
+  name: "selection.cleared";
+};
+
+type SelectionZoomedTo = {
+  name: "selection.zoomedTo";
+  source: "toolbar" | "context-menu";
+  count: number;
+  description: string;
+};
+
+type AssetDeselected = {
+  name: "asset.deselected";
+  type: Asset["type"];
+};
+
+type SatelliteViewToggled = {
+  name: "satelliteView.toggled";
+  source: "button" | "shortcut";
+};
+
+export type AssetDeleted = {
+  name: "asset.deleted";
+  source: "shortcut" | "toolbar" | "context-menu" | "data-table";
+  type: Asset["type"];
+};
+
+export type AssetsDeleted = {
+  name: "assets.deleted";
+  source: "shortcut" | "toolbar" | "context-menu" | "data-table";
+  count: number;
+};
+
+export type AssetsIncludedInActiveTopology = {
+  name: "assets.includedInActiveTopology";
+  source: "shortcut" | "toolbar" | "context-menu";
+  count: number;
+};
+
+export type AssetsExcludedFromActiveTopology = {
+  name: "assets.excludedFromActiveTopology";
+  source: "shortcut" | "toolbar" | "context-menu";
+  count: number;
+};
+
+export type ElevationsRecomputed = {
+  name: "elevations.recomputed";
+  mode: "missing" | "all";
+  resolved: number;
+  unresolved: number;
+};
+
+type WelcomeSeen = {
+  name: "welcome.seen";
+};
+
+export type WelcomeOpened = {
+  name: "welcome.opened";
+  source:
+    | "menu"
+    | "inpIssues"
+    | "geocodeError"
+    | "missingCoordinatesError"
+    | "malformedCoordinatesError"
+    | "invalidFilesError"
+    | "toolbar"
+    | "networkRequired";
+};
+
+type ModelBuilderOpened = {
+  name: "modelBuilder.opened";
+  source: string;
+};
+type ModelBuilderCompleted = {
+  name: "modelBuilder.completed";
+  version?: "v2";
+};
+type ModelBuilderPaywallSeen = {
+  name: "modelBuilder.paywall.seen";
+  source: string;
+};
+type ModelBuilderPaywallDismissed = {
+  name: "modelBuilder.paywall.dismissed";
+  source: string;
+};
+type ModelBuilderPaywallContinuedWithLegacy = {
+  name: "modelBuilder.paywall.continuedWithLegacy";
+  source: string;
+};
+type ModelBuilderPaywallUpgradeClicked = {
+  name: "modelBuilder.paywall.upgradeClicked";
+  source: string;
+};
+
+type ExamplesOpened = {
+  name: "examples.opened";
+  source: string;
+};
+
+type WelcomeHidden = {
+  name: "welcome.hidden";
+};
+
+type WelcomeEnabled = {
+  name: "welcome.enabled";
+};
+
+type ExampleModelClicked = {
+  name: "exampleModel.clicked";
+  modelName: string;
+};
+
+type SimulationExecuted = {
+  name: "simulation.executed";
+  source: "shortcut" | "toolbar";
+  qualityType: QualitySimulationType;
+};
+
+type SimulationValidationIssuesFound = {
+  name: "simulation.validation.issuesFound";
+  issueCount: number;
+  rules: string[];
+};
+
+type SimulationValidationResolved = {
+  name: "simulation.validation.resolved";
+  choice: "fixFirst" | "runAnyway";
+};
+
+type SimulationValidationCancelled = {
+  name: "simulation.validation.cancelled";
+  at: "checking" | "issuesFound" | "failed";
+};
+
+type SimulationTimestepChanged = {
+  name: "simulation.timestep.changed";
+  timestepIndex: number;
+  source: "shortcut" | "buttons" | "dropdown" | "quick-graph";
+};
+
+type SimulationPlaybackStopped = {
+  name: "simulation.playback.stopped";
+  source: "shortcut" | "buttons" | "dropdown" | "quick-graph" | "auto";
+};
+
+type SimulationPlaybackStarted = {
+  name: "simulation.playback.started";
+  source: "shortcut" | "buttons";
+  speed: PlaybackSpeed;
+  speedMs: number;
+  isTooFast: boolean;
+};
+
+type SimulationPlaybackSpeedChanged = {
+  name: "simulation.playback.speedChanged";
+  speed: PlaybackSpeed;
+  speedMs: number;
+  isTooFast: boolean;
+};
+
+type ReportOpened = {
+  name: "report.opened";
+  source: "shortcut" | "resultDialog" | "toolbar";
+  status: SimulationState["status"];
+};
+
+export type OpenInpStarted = {
+  name: "openInp.started";
+  source: string;
+};
+
+export type RecentFileOpened = {
+  name: "recentFile.opened";
+  source: "toolbar" | "welcome";
+  filename: string;
+  kind: "inp" | "project";
+};
+
+export type ConvertModelStarted = {
+  name: "convertModel.started";
+  source: string;
+  vendor: ConverterVendor;
+  canImportSynergi: boolean;
+};
+
+export type ConvertModelCompleted = {
+  name: "convertModel.completed";
+  source: string;
+  vendor: ConverterVendor;
+  counts: Record<string, number>;
+  issues: string[];
+};
+
+export type ConvertModelFailed = {
+  name: "convertModel.failed";
+  source: string;
+  vendor: ConverterVendor;
+  issues: string[];
+};
+
+export type ImportInpCompleted = {
+  name: "importInp.completed";
+  source: string;
+  counts: Record<string, number>;
+  headlossFormula: HeadlossFormula;
+  units: EpanetUnitSystem;
+  isMadeByApp: boolean;
+  issues: (
+    | `unsupportedSection-${string}`
+    | "nodesMissingCoordinates"
+    | "malformedCoordinates"
+    | "malformedVertices"
+    | "invalidVertices"
+    | "invalidCoordinates"
+    | `nonDefaultOption-${string}`
+    | `nonDefaultTime-${string}`
+    | "unbalancedDiff"
+    | "hasInvalidPumpCurves"
+    | "hasUndefinedPumpCurve"
+    | "invalidValveKinds"
+    | "hasWaterAge"
+    | "hasWaterChemical"
+    | "hasWaterTrace"
+  )[];
+};
+
+type FilesDropped = {
+  name: "files.dropped";
+  count: number;
+  filenames: string[];
+  extensions: (string | null)[];
+};
+
+type DownloadErrorSeen = {
+  name: "downloadError.seen";
+};
+
+type NewModelStarted = {
+  name: "newModel.started";
+  source: string;
+};
+
+type NewModelCompleted = {
+  name: "newModel.completed";
+  units: keyof Presets;
+  headlossFormula: HeadlossFormula;
+  location: string;
+  projection?: string;
+};
+
+type ModelSaved = {
+  name: "model.saved";
+  source: string;
+  isSaveAs?: boolean;
+};
+
+type InpExported = {
+  name: "inp.exported";
+  source: string;
+  isSaveAs?: boolean;
+};
+
+type ProjectSaved = {
+  name: "project.saved";
+  source: string;
+  isSaveAs?: boolean;
+};
+
+export type OpenProjectStarted = {
+  name: "openProject.started";
+  source: string;
+};
+
+export type SessionRecoveryOffered = {
+  name: "sessionRecovery.offered";
+  count?: number;
+};
+
+export type SessionRecoveryRecovered = {
+  name: "sessionRecovery.recovered";
+  count?: number;
+};
+
+export type SessionRecoveryFailed = {
+  name: "sessionRecovery.failed";
+};
+
+export type SessionRecoveryDiscarded = {
+  name: "sessionRecovery.discarded";
+};
+
+export type SessionRecoveryIgnored = {
+  name: "sessionRecovery.ignored";
+  count: number;
+};
+
+export type ProjectFileOpened = {
+  name: "projectFile.opened";
+  source: string;
+  counts: Record<string, number>;
+  headlossFormula: HeadlossFormula;
+  units: EpanetUnitSystem;
+  uniqueId?: string;
+  filename?: string;
+  projectName?: string;
+};
+
+export type ProjectFileOpenFailed = {
+  name: "projectFile.openFailed";
+  source: string;
+  reason: "tooNew" | "corrupt" | "migrationFailed" | "internal" | "exception";
+  fileVersion?: number;
+  appVersion?: number;
+};
+
+type OperationUndone = {
+  name: "operation.undone";
+  source: "shortcut" | "toolbar";
+};
+
+type OperationRedone = {
+  name: "operation.redone";
+  source: "shortcut" | "toolbar";
+};
+
+type DrawingModeEnabled = {
+  name: "drawingMode.enabled";
+  source: "toolbar" | "shortcut";
+  type: (typeof MODE_INFO)[keyof typeof MODE_INFO]["name"];
+};
+
+type UnsavedChangesSeen = {
+  name: "unsavedChanges.seen";
+};
+
+type InpIssuesSeen = {
+  name: "inpIssues.seen";
+};
+type InpIssuesExpanded = {
+  name: "inpIssues.expanded";
+};
+type CoordinatesIssuesExpanded = {
+  name: "coordinatesIssues.expanded";
+};
+type ConvertModelIssuesSeen = {
+  name: "convertModelIssues.seen";
+};
+type ConvertModelFailedSeen = {
+  name: "convertModelFailed.seen";
+};
+type ConvertModelIssuesExpanded = {
+  name: "convertModelIssues.expanded";
+};
+type NetworkProjectionSource = "import" | "map-panel";
+type NetworkProjectionSeen = {
+  name: "networkProjection.seen";
+  source: NetworkProjectionSource;
+};
+type NetworkProjectionSearched = {
+  name: "networkProjection.searched";
+  source: NetworkProjectionSource;
+  query: string;
+  queryLength: number;
+  resultType: "location" | "projection";
+  resultsCount: number;
+};
+type NetworkProjectionSelected = {
+  name: "networkProjection.selected";
+  source: NetworkProjectionSource;
+  projectionId: string;
+  projectionName: string;
+  outOfBounds: boolean;
+};
+type NetworkProjectionApplied = {
+  name: "networkProjection.applied";
+  source: NetworkProjectionSource;
+  projectionId: string;
+  projectionName: string;
+  outOfBounds: boolean;
+  filename: string;
+  flowUnits: string;
+  bounds: string;
+  query: string;
+  resultType: "location" | "projection";
+};
+type NetworkProjectionSkipped = {
+  name: "networkProjection.skipped";
+  source: NetworkProjectionSource;
+  filename: string;
+  flowUnits: string;
+  bounds: string;
+};
+type NetworkProjectionClosed = {
+  name: "networkProjection.closed";
+  source: NetworkProjectionSource;
+};
+type MissingCoordinatesSeen = {
+  name: "missingCoordinates.seen";
+};
+type MalformedCoordinatesSeen = {
+  name: "malformedCoordinates.seen";
+};
+type InvalidFilesErrorSeen = {
+  name: "invalidFilesError.seen";
+};
+
+type SimulationSummarySeen = {
+  name: "simulationSummary.seen";
+  status: SimulationSummaryState["status"];
+  duration?: number;
+  qualityType: QualitySimulationType;
+};
+
+type ShortcutsOpened = {
+  name: "shortcuts.opened";
+  source: "menu" | "shortcut" | "onboarding";
+};
+
+type PropertyAggregateOpened = {
+  name: "propertyAggregate.opened";
+  property: string;
+};
+
+type QuickStartVisited = {
+  name: "quickStart.visited";
+  source: "welcome";
+};
+
+type HelpCenterVisited = {
+  name: "helpCenter.visited";
+  source: "welcome" | "menu" | "educationPlan";
+};
+
+type RoadmapVisited = {
+  name: "roadmap.visited";
+  source: "menu";
+};
+
+type UtilitiesVisited = {
+  name: "utilities.visited";
+  source: "menu";
+};
+
+type RepoVisited = {
+  name: "repo.visited";
+  source: "welcome" | "menu";
+};
+
+type FoundersPartnerLinkVisited = {
+  name: "foundersPartner.visited";
+  link:
+    | "affinityWater"
+    | "optimatics"
+    | "foundersPartners"
+    | "atkinsRealis"
+    | "anglianWater";
+};
+
+type SignInStarted = {
+  name: "signIn.started";
+  source: "menu";
+};
+
+type SignUpStarted = {
+  name: "signUp.started";
+  source: "menu";
+};
+
+export type SignOutStarted = {
+  name: "signOut.started";
+  source: "userMenu";
+};
+
+type LogOutCompleted = {
+  name: "logOut.completed";
+};
+
+type SubscriptionStarted = {
+  name: "subscription.started";
+  source: "geocodeError" | "inpIssues";
+};
+
+type PageReloaded = {
+  name: "page.reloaded";
+  source: "errorFallback";
+};
+
+type LayersPopoverOpened = {
+  name: "layersPopover.opened";
+  source: "toolbar";
+};
+
+type LayerOpacityChanged = {
+  name: "layerOpacity.changed";
+  oldValue: number;
+  newValue: number;
+  type: string;
+};
+
+type LanguageListOpened = {
+  name: "languageList.opened";
+};
+
+type LanguageChanged = {
+  name: "language.changed";
+  language: string;
+};
+
+type ImportCustomerPointsStarted = {
+  name: "importCustomerPoints.started";
+  source: string;
+};
+
+type ImportZonesStarted = {
+  name: "importZones.started";
+  source: string;
+  canUseZones: boolean;
+};
+
+type ImportCustomerPointsCompleted = {
+  name: "importCustomerPoints.completed";
+  count: number;
+  rulesCount: number;
+  allocatedCount: number;
+  disconnectedCount: number;
+};
+
+type ImportCustomerPointsCanceled = {
+  name: "importCustomerPoints.canceled";
+};
+
+type ImportCustomerPointsAllocationRulesEditStarted = {
+  name: "importCustomerPoints.allocationRules.editStarted";
+  rulesCount: number;
+};
+
+type ImportCustomerPointsAllocationRulesSaved = {
+  name: "importCustomerPoints.allocationRules.saved";
+  rulesCount: number;
+  allocatedCount: number;
+  disconnectedCount: number;
+};
+
+type ImportCustomerPointsAllocationRulesEditCanceled = {
+  name: "importCustomerPoints.allocationRules.editCanceled";
+};
+
+type AllocateCustomerPointsPipeMode = {
+  name: "allocateCustomerPoints.pipeMode";
+  mode: "allPipes" | "selectedPipes";
+};
+
+type AllocateCustomerPointsCustomerMode = {
+  name: "allocateCustomerPoints.customerMode";
+  mode: "allCustomers" | "zoneCustomers";
+};
+
+type AllocateCustomerPointsZoneSelected = {
+  name: "allocateCustomerPoints.zoneSelected";
+};
+
+type AllocateCustomerPointsNextClicked = {
+  name: "allocateCustomerPoints.nextClicked";
+  pipeMode: "allPipes" | "selectedPipes";
+  customerMode: "allCustomers" | "zoneCustomers";
+  hasZone: boolean;
+};
+
+type AllocateCustomerPointsCompleted = {
+  name: "allocateCustomerPoints.completed";
+  count: number;
+  rulesCount: number;
+  allocatedCount: number;
+  disconnectedCount: number;
+  pipeMode: "allPipes" | "selectedPipes";
+  customerMode: "allCustomers" | "zoneCustomers";
+  hasZone: boolean;
+};
+
+type AllocateCustomerPointsBack = {
+  name: "allocateCustomerPoints.back";
+};
+
+type ImportCustomerPointsDataInputNoValidPoints = {
+  name: "importCustomerPoints.dataInput.noValidPoints";
+  fileName: string;
+};
+
+type ImportCustomerPointsDataInputParseError = {
+  name: "importCustomerPoints.dataInput.parseError";
+  fileName: string;
+  errorCode?: string;
+};
+
+type ImportCustomerPointsDataInputUnsupportedFormat = {
+  name: "importCustomerPoints.dataInput.unsupportedFormat";
+  fileName: string;
+};
+
+type ImportCustomerPointsDataInputCustomerPointsLoaded = {
+  name: "importCustomerPoints.dataInput.customerPointsLoaded";
+  validCount: number;
+  totalCount: number;
+  issuesCount: number;
+  fileName: string;
+};
+
+type ImportCustomerPointsDataSelectDemandProperty = {
+  name: "importCustomerPoints.dataMapping.selectDemand";
+  property: string;
+};
+
+type ImportCustomerPointsDataSelectLabelProperty = {
+  name: "importCustomerPoints.dataMapping.selectLabel";
+  property: string;
+};
+
+type ImportCustomerPointsDataSelectPatternProperty = {
+  name: "importCustomerPoints.dataMapping.selectPattern";
+  patternId: string;
+};
+
+type ImportCustomerPointsDataInputSchemaExtracted = {
+  name: "importCustomerPoints.dataInput.next";
+  fileName: string;
+  propertiesCount: number;
+  featuresCount: number;
+};
+
+type ImportCustomerPointsDataInputFileLoaded = {
+  name: "importCustomerPoints.dataInput.fileLoaded";
+  fileName: string;
+  propertiesCount: number;
+  featuresCount: number;
+  coordinateConversion: {
+    detected: string;
+    converted: boolean;
+    fromCRS: string;
+  } | null;
+};
+
+type ImportCustomerPointsDataMappingNoValidPoints = {
+  name: "importCustomerPoints.dataMapping.noValidPoints";
+  fileName: string;
+};
+
+type ImportCustomerPointsDataMappingParseError = {
+  name: "importCustomerPoints.dataMapping.parseError";
+  fileName: string;
+};
+
+type ImportCustomerPointsDataMappingCustomerPointsLoaded = {
+  name: "importCustomerPoints.dataMapping.customerPointsLoaded";
+  validCount: number;
+  totalCount: number;
+  issuesCount: number;
+  fileName: string;
+};
+
+type ImportCustomerPointsDemandOptionsSelected = {
+  name: "importCustomerPoints.demandOptions.selected";
+  option: "replace" | "addOnTop";
+};
+
+type ImportCustomerPointsWizardNext = {
+  name:
+    | "importCustomerPoints.dataInput.next"
+    | "importCustomerPoints.dataMapping.next"
+    | "importCustomerPoints.demandOptions.next"
+    | "importCustomerPoints.allocation.next";
+};
+
+type ImportCustomerPointsWizardBack = {
+  name:
+    | "importCustomerPoints.dataInput.back"
+    | "importCustomerPoints.dataMapping.back"
+    | "importCustomerPoints.demandOptions.back"
+    | "importCustomerPoints.allocation.back";
+};
+
+type ImportCustomerPointsWizardCancel = {
+  name:
+    | "importCustomerPoints.dataInput.cancel"
+    | "importCustomerPoints.dataMapping.cancel"
+    | "importCustomerPoints.demandOptions.cancel"
+    | "importCustomerPoints.allocation.cancel";
+};
+
+type ImportCustomerPointsWarningDialogProceed = {
+  name: "importCustomerPoints.warningDialog.proceed";
+};
+
+type ImportCustomerPointsWarningDialogCancel = {
+  name: "importCustomerPoints.warningDialog.cancel";
+};
+
+type ImportZonesWarningDialogProceed = {
+  name: "importZones.warningDialog.proceed";
+};
+
+type ImportZonesWarningDialogCancel = {
+  name: "importZones.warningDialog.cancel";
+};
+
+type ImportZonesWizardNext = {
+  name: "importZones.dataInput.next" | "importZones.dataMapping.next";
+};
+
+type ImportZonesWizardBack = {
+  name: "importZones.dataMapping.back";
+};
+
+type ImportZonesWizardCancel = {
+  name: "importZones.dataInput.cancel" | "importZones.dataMapping.cancel";
+};
+
+type ImportZonesFileLoaded = {
+  name: "importZones.dataInput.fileLoaded";
+  fileName: string;
+  featuresCount: number;
+  propertiesCount: number;
+  coordinateConversion: boolean;
+};
+
+type ImportZonesParseError = {
+  name: "importZones.dataInput.parseError";
+  fileName: string;
+  errorCode: string;
+};
+
+type ImportZonesSelectLabel = {
+  name: "importZones.dataMapping.selectLabel";
+  property: string;
+};
+
+type ImportZonesCompleted = {
+  name: "importZones.completed";
+  zonesCount: number;
+  mergedCount: number;
+};
+
+type ZoneVisibilityChanged = {
+  name: "map.zonesVisibility.changed";
+  visible: boolean;
+};
+
+type ZoneColorRuleChanged = {
+  name: "map.zonesColorRule.changed";
+  colorRule: string | null;
+};
+
+type ZoneDefaultColorChanged = {
+  name: "map.zonesDefaultColor.changed";
+  color: string;
+};
+
+type ZoneLabelRuleChanged = {
+  name: "map.zonesLabelRule.changed";
+  labelRule: string | null;
+};
+
+type EarlyAccessClickedGet = {
+  name: "earlyAccess.clickedGet";
+  source: "earlyAccessDialog";
+};
+
+type CustomerPointsConnectStarted = {
+  name: "customerPointActions.connectStarted";
+  count: number;
+  source: string;
+};
+
+type CustomerPointsReconnectStarted = {
+  name: "customerPointActions.reconnectStarted";
+  count: number;
+  source: string;
+};
+
+type CustomerPointsDisconnected = {
+  name: "customerPointActions.disconnected";
+  count: number;
+  source: string;
+};
+
+type CustomerPointLabelChanged = {
+  name: "customerPointActions.labelChanged";
+  // Single edit reports the labels; a batch (data-table paste) reports a count.
+  oldLabel?: string;
+  newLabel?: string;
+  count?: number;
+};
+
+type CustomerPointLabelDuplicate = {
+  name: "customerPointActions.labelDuplicate";
+  newLabel: string;
+};
+
+type CustomerPointPanelOpened = {
+  name: "customerPointPanel.opened";
+};
+
+type CustomerPointPanelZoomTo = {
+  name: "customerPointPanel.zoomTo";
+};
+
+type CustomerPointDemandsEdited = {
+  name: "customerPointDemands.edited";
+  oldCount: number;
+  newCount: number;
+};
+
+type CustomerPointCreated = {
+  name: "customerPointActions.created";
+};
+
+type CustomerPointsRemoved = {
+  name: "customerPointActions.removed";
+  count: number;
+  source: string;
+};
+
+type CustomerPointsConnectedCompleted = {
+  name: "customerPoints.connected";
+  count: number;
+  strategy: "nearest-to-point" | "cursor";
+};
+
+type SimulationReportAssetClicked = {
+  name: "simulationReport.assetClicked";
+  assetType: Asset["type"] | null;
+};
+
+type AssetPanelOpened = {
+  name: "assetPanel.opened";
+  source: "draw" | "modelAttributesValidation";
+};
+
+type NetworkReviewOpened = {
+  name: "networkReview.opened";
+  source: "auto";
+};
+
+type NetworkReviewChecked = {
+  name:
+    | "networkReview.orphanAssets.opened"
+    | "networkReview.proximityAnomalies.opened"
+    | "networkReview.connectivityTrace.opened"
+    | "networkReview.crossingPipes.opened"
+    | "networkReview.modelAttributesValidation.opened";
+};
+
+type NetworkReviewChanged =
+  | {
+      name:
+        | "networkReview.orphanAssets.changed"
+        | "networkReview.connectivityTrace.changed"
+        | "networkReview.crossingPipes.changed";
+      count: number;
+    }
+  | {
+      name: "networkReview.proximityAnomalies.changed";
+      count: number;
+      distance: number;
+      units: string;
+    };
+
+type OrphanAssetFixed = {
+  name: "networkReview.orphanAssets.fixed";
+  kind: string;
+  assetId: number;
+  type: string;
+};
+
+type SubnetworkDisabled = {
+  name: "networkReview.connectivityTrace.fixed";
+  linkCount: number;
+  nodeCount: number;
+};
+
+type CrossingPipesConnected = {
+  name: "networkReview.crossingPipes.fixed";
+  pipeIds: number[];
+};
+
+type ProximityDistanceSet = {
+  name: "networkReview.proximityAnomalies.distanceSet";
+  distance: number;
+  units: string;
+};
+
+type NetworkReviewCheckArchived = {
+  name:
+    | "networkReview.proximityAnomalies.archived"
+    | "networkReview.crossingPipes.archived";
+};
+
+type NetworkReviewCheckRestored = {
+  name:
+    | "networkReview.proximityAnomalies.restored"
+    | "networkReview.crossingPipes.restored";
+};
+
+type ProximityAnomalyConnected = {
+  name: "networkReview.proximityAnomalies.fixed";
+  nodeId: number;
+  pipeId: number;
+  distance: number;
+};
+
+type ModelAttributesValidationChanged = {
+  name: "networkReview.modelAttributesValidation.changed";
+  count: number;
+  rules: string[];
+};
+
+type NetworkReviewBack = {
+  name:
+    | "networkReview.orphanAssets.back"
+    | "networkReview.proximityAnomalies.back"
+    | "networkReview.connectivityTrace.back"
+    | "networkReview.crossingPipes.back"
+    | "networkReview.modelAttributesValidation.back";
+  count: number;
+};
+
+type ModelAttributesValidationGroupOpened = {
+  name: "networkReview.modelAttributesValidation.groupOpened";
+  ruleId: string;
+  severity: "error" | "warning";
+  count: number;
+};
+
+type ModelAttributesValidationBulkSelected = {
+  name: "networkReview.modelAttributesValidation.bulkSelected";
+  ruleId: string;
+  count: number;
+};
+
+type SidePanelOpened = {
+  name: "sidePanel.opened";
+  source: string;
+};
+
+type SidePanelClosed = {
+  name: "sidePanel.closed";
+  source: string;
+};
+
+type ScenarioSwitcherOpened = {
+  name: "scenarioSwitcher.opened";
+};
+
+type ScenarioCreated = {
+  name: "scenario.created";
+  scenarioId: string;
+  scenarioName: string;
+  isDemoNetwork: boolean;
+};
+
+type ScenarioSwitched = {
+  name: "scenario.switched";
+  scenarioId: string | null;
+  scenarioName: string | undefined;
+};
+
+type ScenarioDeleted = {
+  name: "scenario.deleted";
+  scenarioId: string;
+  scenarioName: string;
+};
+
+type ScenarioRenamed = {
+  name: "scenario.renamed";
+  scenarioId: string;
+  oldName: string;
+  newName: string;
+};
+
+type ScenarioDeleteDialogCancel = {
+  name: "scenario.deleteDialog.cancel";
+};
+
+type ScenarioToggled = {
+  name: "scenario.toggled";
+  source: string;
+};
+
+type ScenarioCycled = {
+  name: "scenario.cycled";
+  source: string;
+};
+
+type PatternChanged = {
+  name: "pattern.changed";
+  property: "label" | "multipliers" | "type";
+};
+
+type PatternAdded = {
+  name: "pattern.added";
+  source: "new" | "clone";
+};
+
+type PatternDeleted = {
+  name: "pattern.deleted";
+};
+
+type PatternLabelDuplicate = {
+  name: "pattern.labelDuplicate";
+};
+
+type PatternsUpdated = {
+  name: "patterns.updated";
+  count: number;
+};
+
+type PatternsDiscarded = {
+  name: "patterns.discarded";
+};
+
+type PatternsUncategorized = {
+  name: "patterns.uncategorized";
+  count: number;
+};
+
+type CurvesExported = {
+  name: "curves.exported";
+  format: "csv" | "xlsx";
+  count: number;
+};
+
+type PatternsExported = {
+  name: "patterns.exported";
+  format: "csv" | "xlsx";
+  count: number;
+};
+
+type CurvesImportedFromFile = {
+  name: "curves.importedFromFile";
+  status: "success" | "error" | "partial";
+  format?: "csv" | "xlsx";
+  count: number;
+};
+
+type PatternsImportedFromFile = {
+  name: "patterns.importedFromFile";
+  status: "success" | "error" | "partial";
+  format?: "csv" | "xlsx";
+  count: number;
+};
+
+type PipeLibraryOpened = {
+  name: "pipeLibrary.opened";
+  source: "toolbar";
+  canUsePipeLibrary: boolean;
+};
+
+type PipeLibraryMaterialChanged = {
+  name: "pipeLibrary.material.changed";
+  action: "added" | "renamed" | "duplicated" | "deleted";
+};
+
+type PipeLibraryRoughnessRowChanged = {
+  name: "pipeLibrary.roughnessRow.changed";
+  action: "insertedAbove" | "insertedBelow" | "deleted";
+};
+
+type PipeLibraryImportedFromModel = {
+  name: "pipeLibrary.importedFromModel";
+  materialsDetected: number;
+};
+
+type PipeLibrarySaved = {
+  name: "pipeLibrary.saved";
+  materialsCount: number;
+};
+
+type PipeLibraryExported = {
+  name: "pipeLibrary.exported";
+  format: "csv" | "xlsx";
+};
+
+type PipeLibraryImportedFromFile = {
+  name: "pipeLibrary.importedFromFile";
+  materialsCount: number;
+  status: "success" | "partial" | "error";
+  format?: "csv" | "xlsx";
+};
+
+type PipeLibraryClosed = {
+  name: "pipeLibrary.closed";
+  hadChanges: boolean;
+};
+
+type PumpLibraryOpened = {
+  name: "pumpLibrary.opened";
+  source: "toolbar" | "pump";
+};
+
+type CurveLibraryOpened = {
+  name: "curveLibrary.opened";
+  source: "toolbar" | "valve" | "tank";
+};
+
+type CurvesUpdated = {
+  name: "curves.updated";
+  count: number;
+  withWarnings: boolean;
+};
+
+type CurvesDiscarded = {
+  name: "curves.discarded";
+};
+
+type CurvesUncategorized = {
+  name: "curves.uncategorized";
+  count: number;
+};
+
+type CurveAdded = {
+  name: "curve.added";
+  source: "new" | "clone";
+};
+
+type CurveDeleted = {
+  name: "curve.deleted";
+};
+
+type CurveChanged = {
+  name: "curve.changed";
+  property: "label" | "points" | "type";
+};
+
+type CustomAttributesOpened = {
+  name: "customAttributes.opened";
+  source: "toolbar";
+  canUseCustomAttributes: boolean;
+};
+
+type CustomAttributesUpdated = {
+  name: "customAttributes.updated";
+  count: number;
+  newLabels: string[];
+  newAttributeTypes: CustomAttributeType[];
+};
+
+type AssetDataExported = {
+  name: "assetData.exported";
+  format: "geojson" | "csv" | "shapefile" | "xlsx";
+  includeSimulationResults: boolean;
+  hasSelection: boolean;
+};
+
+type SimulationResultsExported = {
+  name: "simulationResults.exported";
+  format: "csv" | "xlsx";
+  properties: string[];
+  hasSelection: boolean;
+};
+
+type CustomGraphExported = {
+  name: "customGraph.exported";
+  format: "png" | "csv" | "xlsx";
+  numAssets: number;
+};
+
+type CustomGraphOpened = {
+  name: "customGraph.opened";
+  numAssets: number;
+  canUseCustomGraphs: boolean;
+};
+
+type CustomGraphPropertySelected = {
+  name: "customGraph.propertySelected";
+  property: string;
+  numAssets: number;
+};
+
+export type UserEvent =
+  | AssetCreated
+  | AssetRedrawed
+  | AssetRedrawStarted
+  | LinkReversed
+  | AssetSelected
+  | AssetDeselected
+  | AssetControlChanged
+  | AssetControlRemoved
+  | AssetPropertyEdited
+  | AssetPropertyBatchEdited
+  | AssetPropertiesEdited
+  | CustomAttributeEdited
+  | CustomAttributeBatchEdited
+  | AssetStatusEdited
+  | AssetDefinitionTypeEdited
+  | PumpCurveEdited
+  | SatelliteViewToggled
+  | AssetsDeleted
+  | AssetDeleted
+  | AssetsIncludedInActiveTopology
+  | AssetsExcludedFromActiveTopology
+  | ElevationsRecomputed
+  | WelcomeSeen
+  | WelcomeOpened
+  | WelcomeHidden
+  | WelcomeEnabled
+  | UnsavedChangesSeen
+  | ExampleModelClicked
+  | SimulationExecuted
+  | SimulationValidationIssuesFound
+  | SimulationValidationResolved
+  | SimulationValidationCancelled
+  | SimulationTimestepChanged
+  | SimulationPlaybackStopped
+  | SimulationPlaybackStarted
+  | SimulationPlaybackSpeedChanged
+  | ReportOpened
+  | OpenInpStarted
+  | RecentFileOpened
+  | ImportInpCompleted
+  | ConvertModelStarted
+  | ConvertModelCompleted
+  | ConvertModelFailed
+  | ConvertModelIssuesSeen
+  | ConvertModelFailedSeen
+  | ConvertModelIssuesExpanded
+  | FilesDropped
+  | InvalidFilesErrorSeen
+  | DownloadErrorSeen
+  | NewModelStarted
+  | NewModelCompleted
+  | ModelSaved
+  | InpExported
+  | ProjectSaved
+  | OpenProjectStarted
+  | ProjectFileOpened
+  | ProjectFileOpenFailed
+  | OperationUndone
+  | OperationRedone
+  | DrawingModeEnabled
+  | MultiSelectUpdated
+  | SelectionNarrowedToAssetType
+  | SelectionNarrowedToPropertyValue
+  | FullSelectionEnabled
+  | SelectionCleared
+  | SelectionZoomedTo
+  | InpIssuesSeen
+  | InpIssuesExpanded
+  | CoordinatesIssuesExpanded
+  | MissingCoordinatesSeen
+  | MalformedCoordinatesSeen
+  | NetworkProjectionSeen
+  | NetworkProjectionSearched
+  | NetworkProjectionSelected
+  | NetworkProjectionApplied
+  | NetworkProjectionSkipped
+  | NetworkProjectionClosed
+  | SimulationSummarySeen
+  | ShortcutsOpened
+  | PropertyAggregateOpened
+  | QuickStartVisited
+  | HelpCenterVisited
+  | RoadmapVisited
+  | UtilitiesVisited
+  | RepoVisited
+  | FoundersPartnerLinkVisited
+  | SignUpStarted
+  | SignInStarted
+  | SignOutStarted
+  | LogOutCompleted
+  | SubscriptionStarted
+  | PageReloaded
+  | LayersPopoverOpened
+  | LayerOpacityChanged
+  | LanguageListOpened
+  | LanguageChanged
+  | ImportCustomerPointsStarted
+  | ImportCustomerPointsCompleted
+  | ImportCustomerPointsCanceled
+  | ImportCustomerPointsAllocationRulesEditStarted
+  | ImportCustomerPointsAllocationRulesSaved
+  | ImportCustomerPointsAllocationRulesEditCanceled
+  | AllocateCustomerPointsPipeMode
+  | AllocateCustomerPointsCustomerMode
+  | AllocateCustomerPointsZoneSelected
+  | AllocateCustomerPointsNextClicked
+  | AllocateCustomerPointsCompleted
+  | AllocateCustomerPointsBack
+  | ImportCustomerPointsDataInputNoValidPoints
+  | ImportCustomerPointsDataInputParseError
+  | ImportCustomerPointsDataInputUnsupportedFormat
+  | ImportCustomerPointsDataInputCustomerPointsLoaded
+  | ImportCustomerPointsDataInputSchemaExtracted
+  | ImportCustomerPointsDataInputFileLoaded
+  | ImportCustomerPointsDataMappingNoValidPoints
+  | ImportCustomerPointsDataMappingParseError
+  | ImportCustomerPointsDataMappingCustomerPointsLoaded
+  | ImportCustomerPointsDemandOptionsSelected
+  | ImportCustomerPointsWizardNext
+  | ImportCustomerPointsWizardBack
+  | ImportCustomerPointsWizardCancel
+  | ImportCustomerPointsWarningDialogProceed
+  | ImportCustomerPointsWarningDialogCancel
+  | ImportZonesWarningDialogProceed
+  | ImportZonesWarningDialogCancel
+  | ImportZonesStarted
+  | ImportZonesWizardNext
+  | ImportZonesWizardBack
+  | ImportZonesWizardCancel
+  | ImportZonesFileLoaded
+  | ImportZonesParseError
+  | ImportZonesSelectLabel
+  | ImportZonesCompleted
+  | ZoneVisibilityChanged
+  | ZoneColorRuleChanged
+  | ZoneDefaultColorChanged
+  | ZoneLabelRuleChanged
+  | EarlyAccessClickedGet
+  | CustomerPointsConnectStarted
+  | CustomerPointsReconnectStarted
+  | CustomerPointsDisconnected
+  | CustomerPointLabelChanged
+  | CustomerPointLabelDuplicate
+  | CustomerPointCreated
+  | CustomerPointsRemoved
+  | CustomerPointsConnectedCompleted
+  | CustomerPointPanelOpened
+  | CustomerPointPanelZoomTo
+  | CustomerPointDemandsEdited
+  | SimulationReportAssetClicked
+  | ModelBuilderOpened
+  | ModelBuilderCompleted
+  | ModelBuilderPaywallSeen
+  | ModelBuilderPaywallDismissed
+  | ModelBuilderPaywallContinuedWithLegacy
+  | ModelBuilderPaywallUpgradeClicked
+  | ExamplesOpened
+  | ImportCustomerPointsDataSelectDemandProperty
+  | ImportCustomerPointsDataSelectLabelProperty
+  | ImportCustomerPointsDataSelectPatternProperty
+  | AssetPanelOpened
+  | NetworkReviewOpened
+  | NetworkReviewChecked
+  | NetworkReviewBack
+  | NetworkReviewChanged
+  | OrphanAssetFixed
+  | SubnetworkDisabled
+  | CrossingPipesConnected
+  | ProximityAnomalyConnected
+  | NetworkReviewCheckArchived
+  | NetworkReviewCheckRestored
+  | ProximityDistanceSet
+  | ModelAttributesValidationChanged
+  | ModelAttributesValidationGroupOpened
+  | ModelAttributesValidationBulkSelected
+  | SidePanelOpened
+  | SidePanelClosed
+  | ScenarioSwitcherOpened
+  | ScenarioCreated
+  | ScenarioSwitched
+  | ScenarioDeleted
+  | ScenarioRenamed
+  | ScenarioDeleteDialogCancel
+  | ScenarioToggled
+  | ScenarioCycled
+  | {
+      name: "elevationSource.tilesLoaded";
+      operation: "new" | "append";
+      filesCount: number;
+      processedCount: number;
+      issues?: string[];
+    }
+  | {
+      name: "elevationSource.deleted";
+      sourceType: string;
+    }
+  | {
+      name: "elevationSource.offsetChanged";
+      sourceType: string;
+      oldValue: number;
+      newValue: number;
+    }
+  | {
+      name: "elevationSource.toggled";
+      sourceType: string;
+      enabled: boolean;
+    }
+  | {
+      name: "elevationSource.tileDeleted";
+    }
+  | {
+      name: "elevationSource.elevationUnitChanged";
+      oldValue: string;
+      newValue: string;
+    }
+  | { name: "map.labels.shown"; type: string; subtype: string }
+  | { name: "map.labels.hidden"; type: string }
+  | { name: "map.customerPoints.shown" }
+  | { name: "map.customerPoints.hidden" }
+  | { name: "map.defaultColor.changed"; type: string }
+  | {
+      name: "map.nodeSize.changed";
+      property: "minSize" | "maxSize" | "minVisibleZoom";
+      oldValue: number;
+      newValue: number;
+    }
+  | {
+      name: "map.colorBy.changed";
+      type: string;
+      subtype: string;
+      property: string;
+    }
+  | { name: "map.colorRamp.changed"; rampName: string; property: string }
+  | { name: "map.colorRamp.reversed"; rampName: string; property: string }
+  | { name: "map.zonePalette.changed"; paletteName: string }
+  | { name: "colorRange.rangeMode.changed"; mode: string; property: string }
+  | {
+      name: "colorRange.classes.changed";
+      classesCount: number;
+      property: string;
+    }
+  | { name: "colorRange.break.updated"; breakValue: number; property: string }
+  | { name: "colorRange.break.prepended"; property: string }
+  | { name: "colorRange.break.appended"; property: string }
+  | { name: "colorRange.break.deleted"; property: string }
+  | { name: "colorRange.intervalColor.changed"; property: string }
+  | {
+      name: "colorRange.breaks.regenerated";
+      property: string;
+      mode: "default" | "step" | "all";
+    }
+  | {
+      name: "colorRange.rangeError.seen";
+      property: string;
+      errorKey: string;
+      mode: string;
+      classesCount: number;
+    }
+  | { name: "legend.clicked"; property: string }
+  | { name: "layerLabelVisibility.changed"; visible: boolean; type: string }
+  | { name: "layer.removed"; type: string }
+  | { name: "layerVisibility.changed"; visible: boolean; type: string }
+  | {
+      name: "customLayer.added";
+      type: "GEOJSON";
+      filesCount: number;
+      processedCount: number;
+      featureCount: number;
+      issues: string[];
+    }
+  | { name: "customLayer.added"; type: string }
+  | { name: "addCustomLayer.clicked" }
+  | { name: "layerType.choosen"; type: string }
+  | {
+      name: "checkout.started";
+      plan: string;
+      paymentType: string;
+      source?: UpgradeOrigin;
+      sourceFeature?: string;
+    }
+  | { name: "studentLogin.clicked" }
+  | { name: "planUsage.toggled" }
+  | { name: "planPaymentType.toggled" }
+  | {
+      name: "upgradeButton.clicked";
+      source: "menu" | "customLayers" | "customElevations";
+    }
+  | {
+      name: "billingPortal.opened";
+      source: "menu" | "userMenu";
+      trial: "running" | "ended" | "none";
+    }
+  | {
+      name: "upgradeDialog.seen";
+      source?: UpgradeOrigin;
+      sourceFeature?: string;
+    }
+  | {
+      name: "upgradeDialog.dismissed";
+      source?: UpgradeOrigin;
+      sourceFeature?: string;
+    }
+  | { name: "simulationSettings.opened"; source: string }
+  | { name: "controls.opened"; source: string }
+  | { name: "patternsLibrary.opened"; source: string }
+  | { name: "assetControls.opened"; source: string }
+  | {
+      name: "dataTables.opened";
+      source: string;
+      scope?: string;
+      tables?: string[];
+    }
+  | {
+      name: "dataTables.closed";
+      source: string;
+      panelType: string;
+    }
+  | { name: "bottomPanel.tabSwitched"; panelType: string }
+  | {
+      name: "bottomPanel.tabReordered";
+      panelType: string;
+      fromIndex: number;
+      toIndex: number;
+    }
+  | {
+      name: "bottomPanel.toggled";
+      open: boolean;
+      activePanelType: string | null;
+      source: "toolbar" | "shortcut";
+    }
+  | {
+      name: "leftPanel.toggled";
+      open: boolean;
+      activePanelType: string | null;
+      source: "toolbar" | "shortcut";
+    }
+  | { name: "leftPanel.tabSwitched"; panelType: string }
+  | { name: "rightPanel.tabSwitched"; panelType: string }
+  | {
+      name: "rightPanel.tabReordered";
+      panelType: string;
+      fromIndex: number;
+      toIndex: number;
+    }
+  | {
+      name: "leftPanel.tabReordered";
+      panelType: string;
+      fromIndex: number;
+      toIndex: number;
+    }
+  | {
+      name: "selectionSet.created";
+      count: number;
+      totalSets: number;
+      source: CollectionDraftSource;
+    }
+  | {
+      name: "selectionSet.applied";
+      count: number;
+      missing: number;
+      zoom: boolean;
+      source: "panel";
+    }
+  | { name: "selectionSet.draftStarted"; source: CollectionDraftSource }
+  | { name: "selectionSet.renamed"; source: "panel" }
+  | { name: "selectionSet.deleted"; source: "panel" }
+  | { name: "bookmark.draftStarted"; source: CollectionDraftSource }
+  | {
+      name: "bookmark.created";
+      totalBookmarks: number;
+      source: CollectionDraftSource;
+    }
+  | { name: "bookmark.visited"; source: "panel" }
+  | { name: "bookmark.renamed"; source: "panel" }
+  | { name: "bookmark.deleted"; source: "panel" }
+  | {
+      name: "dataTables.cellEdited";
+      type: Asset["type"];
+      property: string;
+      count: number;
+    }
+  | {
+      name: "dataTables.copied";
+      type: Asset["type"] | "customerPoint";
+      requestedRows: number;
+      rows: number;
+      cols: number;
+      allRows: boolean;
+      allCols: boolean;
+      withHeaders: boolean;
+      columnIds: string[];
+    }
+  | {
+      name: "dataTables.pasted";
+      type: Asset["type"] | "customerPoint";
+      rows: number;
+      cols: number;
+      allRows: boolean;
+      allCols: boolean;
+      columnIds: string[];
+    }
+  | {
+      name: "dataTables.sorted";
+      type: Asset["type"] | "customerPoint";
+      property: string;
+      direction: "asc" | "desc";
+    }
+  | {
+      name: "dataTables.selectedInMap";
+      type: Asset["type"] | "customerPoint";
+      source: "cell-context" | "gutter-context";
+      count: number;
+    }
+  | { name: "profileView.opened"; source: string }
+  | { name: "profileView.selectionStarted"; source: string }
+  | { name: "profileView.closed"; source: string }
+  | {
+      name: "profileView.pathCreated";
+      anchorCount: number;
+      nodeCount: number;
+      linkCount: number;
+      totalLength: number;
+      hasSimulationResults: boolean;
+      simulationStatus: SimulationState["status"];
+    }
+  | {
+      name: "profileView.pathExtended";
+      anchorCount: number;
+      nodeCount: number;
+      linkCount: number;
+      totalLength: number;
+      hasSimulationResults: boolean;
+      simulationStatus: SimulationState["status"];
+    }
+  | {
+      name: "profileView.assetSelectedFromChart";
+      kind: "node" | "link";
+      assetType: Asset["type"];
+      grid: "main" | "sld";
+    }
+  | { name: "profileView.selectionCancelled"; anchorCount: number }
+  | { name: "profileView.pathBroken"; anchorCount: number }
+  | {
+      name: "simulationSetting.changed";
+      settingName: string;
+      newValue: number;
+      oldValue: number;
+    }
+  | { name: "teamsRequest.clicked" }
+  | {
+      name: "baseMap.changed";
+      oldBasemap: string;
+      newBasemap: string;
+      source: "dropdown" | "popover";
+    }
+  | {
+      name: "pipeDrawingDefaults.changed";
+      property: "diameter" | "roughness";
+      newValue: number | null;
+    }
+  | { name: "unexpectedError.seen" }
+  | { name: "simulationOutOfMemory.seen" }
+  | { name: "simulationStorageError.seen" }
+  | { name: "fitMapToNetworkExtent.clicked" }
+  | {
+      name: "controls.changed";
+      simpleControlsCount: number;
+      rulesCount: number;
+    }
+  | { name: "paywallLock.clicked"; feature: PaywallFeature }
+  | {
+      name: "paywall.seen";
+      feature: PaywallFeature;
+      type: "paywall" | "upgrade";
+    }
+  | { name: "paywall.clickedChoosePlan"; feature: PaywallFeature }
+  | { name: "paywall.clickedPersonal"; feature: PaywallFeature }
+  | { name: "paywall.clickedExplorePlans"; feature: PaywallFeature }
+  | { name: "paywall.dismissed"; feature: PaywallFeature }
+  | { name: "priorityAccess.seen"; featureName: string }
+  | { name: "priorityAccess.clickedUpgrade"; featureName: string }
+  | { name: "priorityAccess.dismissed"; featureName: string }
+  | { name: "trial.clickedStart"; source: UpgradeOrigin; feature: string }
+  | { name: "trial.activated" }
+  | { name: "trial.refused" }
+  | { name: "firstScenario.dialogEnabled" }
+  | { name: "firstScenario.dialogHidden" }
+  | {
+      name: "commandBar.opened";
+      source: "shortcut" | "toolbar";
+    }
+  | {
+      name: "commandBar.closed";
+      outcome: "selected" | "dismissed";
+      query: string;
+      queryLength: number;
+      resultsCount: number;
+      selectedKind?: "asset" | "customerPoint";
+      selectedAssetType?: Asset["type"];
+      selectedFromRecents?: boolean;
+      selectedIndex?: number;
+    }
+  | PatternChanged
+  | PatternAdded
+  | PatternDeleted
+  | PatternLabelDuplicate
+  | PatternsUpdated
+  | PatternsDiscarded
+  | PatternsUncategorized
+  | PatternsExported
+  | CurvesExported
+  | PatternsImportedFromFile
+  | CurvesImportedFromFile
+  | PipeLibraryOpened
+  | PipeLibraryMaterialChanged
+  | PipeLibraryRoughnessRowChanged
+  | PipeLibraryImportedFromModel
+  | PipeLibrarySaved
+  | PipeLibraryExported
+  | PipeLibraryImportedFromFile
+  | PipeLibraryClosed
+  | PumpLibraryOpened
+  | CurveLibraryOpened
+  | CurvesUpdated
+  | CurvesDiscarded
+  | CurvesUncategorized
+  | CurveAdded
+  | CurveDeleted
+  | CurveChanged
+  | CustomAttributesOpened
+  | CustomAttributesUpdated
+  | AssetDataExported
+  | SimulationResultsExported
+  | CustomGraphExported
+  | CustomGraphOpened
+  | CustomGraphPropertySelected
+  | SessionRecoveryOffered
+  | SessionRecoveryRecovered
+  | SessionRecoveryFailed
+  | SessionRecoveryDiscarded
+  | SessionRecoveryIgnored;
+
+const debugPostHog = {
+  capture: (...data: any[]) => {
+    // eslint-disable-next-line
+    console.log("USER_TRACKING:CAPTURE", ...data);
+  },
+  identify: (...data: any[]) => {
+    // eslint-disable-next-line
+    console.log("USER_TRACKING:IDENTIFY", ...data);
+  },
+  reset: () => {
+    // eslint-disable-next-line
+    console.log("USER_TRACKING:RESET");
+  },
+  setUserProperties: (...data: any[]) => {
+    // eslint-disable-next-line
+    console.log("USER_TRACKING:SET_USER_PROPERTIES", ...data);
+  },
+};
+
+export const useUserTracking = () => {
+  const posthog = usePostHog();
+  const { privacySettings } = usePrivacySettings();
+
+  const isAnalyticsDisabled =
+    process.env.NEXT_PUBLIC_SKIP_USER_TRACKING === "true" ||
+    privacySettings?.skipAnalytics === true;
+
+  const capture = useCallback(
+    (event: UserEvent) => {
+      if (isAnalyticsDisabled) return;
+      const { name, ...metadata } = event;
+
+      posthog.capture(name, metadata);
+      isDebugOn && debugPostHog.capture(name, metadata);
+    },
+    [posthog, isAnalyticsDisabled],
+  );
+
+  const identify = useCallback(
+    (user: User) => {
+      const properties = {
+        email: user.email,
+        first_name: user.firstName,
+        last_name: user.lastName,
+      };
+
+      posthog.identify(user.id || "", properties);
+      isDebugOn && debugPostHog.identify(user.id, properties);
+    },
+    [posthog],
+  );
+
+  const setUserProperties = useCallback(
+    (properties: Metadata) => {
+      posthog.setPersonProperties(properties);
+      isDebugOn && debugPostHog.setUserProperties(properties);
+    },
+    [posthog],
+  );
+
+  const isIdentified = useCallback(() => {
+    return posthog._isIdentified();
+  }, [posthog]);
+
+  const reset = useCallback(() => {
+    posthog.reset();
+    isDebugOn && debugPostHog.reset();
+  }, [posthog]);
+
+  const reloadFeatureFlags = useCallback(() => {
+    if (posthog?.reloadFeatureFlags) {
+      posthog.reloadFeatureFlags();
+    }
+  }, [posthog]);
+
+  return useMemo(
+    () => ({
+      identify,
+      capture,
+      isIdentified,
+      reset,
+      reloadFeatureFlags,
+      setUserProperties,
+    }),
+    [
+      identify,
+      capture,
+      isIdentified,
+      reset,
+      reloadFeatureFlags,
+      setUserProperties,
+    ],
+  );
+};

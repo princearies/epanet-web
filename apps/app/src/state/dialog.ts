@@ -1,0 +1,444 @@
+import { atomWithReset } from "jotai/utils";
+import { ParserIssues } from "src/import/inp";
+import type { Issue } from "@epanet-js/converters";
+import type { QualitySimulationType } from "src/simulation/simulation-settings";
+import { CurveId } from "@epanet-js/hydraulic-model";
+import type { CustomAttributeAssetType } from "@epanet-js/hydraulic-model";
+import type { BBox, FeatureCollection } from "geojson";
+import type { Proj4Projection, Projection } from "@epanet-js/projections";
+import type { ElevationFetchStatus } from "src/lib/elevations";
+import type { RebuildPhase } from "src/lib/db";
+
+export type InvalidFilesErrorDialogState = {
+  type: "invalidFilesError";
+};
+
+export type FileReadErrorDialogState = {
+  type: "fileReadError";
+  fileName: string;
+};
+
+export type UnsavedChangesDialogState = {
+  type: "unsavedChanges";
+  onContinue: () => void;
+};
+
+export type SimulationSummaryState = {
+  type: "simulationSummary";
+  status: "success" | "failure" | "warning" | "stopped";
+  duration?: number;
+  qualityType: QualitySimulationType;
+  onContinue?: () => void;
+  onIgnore?: () => void;
+  ignoreLabel?: string;
+};
+
+export type SimulationReportDialogState = {
+  type: "simulationReport";
+};
+
+export type SimulationOutOfMemoryDialogState = {
+  type: "simulationOutOfMemory";
+};
+
+export type SimulationStorageErrorDialogState = {
+  type: "simulationStorageError";
+};
+
+export type WelcomeDialogState = {
+  type: "welcome";
+};
+
+export type NetworkProjectionDialogState = {
+  type: "networkProjection";
+  source: "import" | "map-panel";
+  previewGeoJson: FeatureCollection;
+  onImportWithProjection: (projection: Projection, extent?: BBox) => void;
+  filename: string;
+  flowUnits: string;
+  initialProjection?: Proj4Projection;
+  suggestedXyScale?: number;
+};
+
+export type MissingCoordinatesDialogState = {
+  type: "inpMissingCoordinates";
+  issues: ParserIssues;
+};
+
+export type MalformedCoordinatesDialogState = {
+  type: "inpMalformedCoordinates";
+  issues: ParserIssues;
+};
+
+export type InpIssuesDialogState = {
+  type: "inpIssues";
+  issues: ParserIssues;
+  onAfterClose?: () => void;
+};
+
+export type ConvertModelFailedDialogState = {
+  type: "convertModelFailed";
+  issues: Issue[];
+};
+
+export type ConvertModelIssuesDialogState = {
+  type: "convertModelIssues";
+  issues: Issue[];
+};
+
+export type FileFormatUpdatedDialogState = {
+  type: "fileFormatUpdated";
+};
+
+export type AlertInpOutputState = {
+  type: "alertInpOutput";
+  onContinue: () => void;
+};
+
+export type AlertExportInpState = {
+  type: "alertExportInp";
+  onSaveProject: () => void;
+  onExportAnyway: () => void;
+};
+
+export type ProjectSavedInfoState = {
+  type: "projectSavedInfo";
+  onConfirm: () => void;
+  onCancel?: () => void;
+};
+
+export type UpgradeOrigin = "paywall" | "upgrade" | "priorityAccess" | "menu";
+
+export type UpgradeDialogState = {
+  type: "upgrade";
+  feature?: string;
+  source?: UpgradeOrigin;
+};
+
+export type ImportCustomerPointsWizardState = {
+  type: "importCustomerPointsWizard";
+};
+
+export type ImportCustomerPointsWarningDialogState = {
+  type: "importCustomerPointsWarning";
+  onContinue: () => void;
+};
+
+export type PreSimulationChecksDialogState = {
+  type: "preSimulationChecks";
+  onReview: () => void;
+  onRunAnyway: () => void;
+  onCancel: () => void;
+} & (
+  | { status: "running"; failingRules?: undefined }
+  | { status: "issuesFound"; failingRules: string[] }
+  | { status: "failed"; failingRules?: undefined }
+);
+
+export type UnexpectedErrorDialogState = {
+  type: "unexpectedError";
+  onRetry?: () => void;
+};
+
+export type ChangeNotAppliedDialogState = {
+  type: "changeNotApplied";
+};
+
+export type ModelBuilderIframeDialogState = {
+  type: "modelBuilderIframe";
+};
+
+export type ModelBuilderV2IframeDialogState = {
+  type: "modelBuilderV2Iframe";
+};
+
+export type ModelBuilderPaywallDialogState = {
+  type: "modelBuilderPaywall";
+  source: string;
+};
+
+export type EarlyAccessDialogState = {
+  type: "earlyAccess";
+  onContinue: () => void;
+  afterSignupDialog?: string;
+};
+
+export type SimulationProgressDialogState = {
+  type: "simulationProgress";
+  currentTime: number;
+  totalDuration: number;
+  phase: "hydraulic" | "quality" | "finalizing";
+};
+
+export type OpenProjectPhase =
+  | "opening"
+  | "reading-assets"
+  | "reading-customer-points"
+  | "reading-settings"
+  | "building"
+  | "finalizing";
+
+export type OpenProjectProgressDialogState = {
+  type: "openProjectProgress";
+  phase: OpenProjectPhase;
+};
+
+export type PatternsLibraryDialog = {
+  type: "patternsLibrary";
+  initialPatternId?: number;
+  initialSection?:
+    | "demand"
+    | "reservoirHead"
+    | "pumpSpeed"
+    | "qualitySourceStrength"
+    | "energyPrice";
+};
+
+export type PumpLibraryDialogState = {
+  type: "pumpLibrary";
+  initialCurveId?: CurveId;
+  initialSection?: "pump" | "efficiency";
+};
+
+export type PipeLibraryDialogState = {
+  type: "pipeLibrary";
+};
+
+export type CurveLibraryDialogState = {
+  type: "curveLibrary";
+  initialCurveId?: CurveId;
+  initialSection?: "volume" | "valve" | "headloss";
+};
+
+export type CustomAttributesDialogState = {
+  type: "customAttributes";
+  initialAssetType?: CustomAttributeAssetType;
+};
+
+export type DeleteScenarioConfirmationDialogState = {
+  type: "deleteScenarioConfirmation";
+  scenarioId: string;
+  scenarioName: string;
+  onConfirm: (scenarioId: string) => void;
+};
+
+export type RenameScenarioDialogState = {
+  type: "renameScenario";
+  scenarioId: string;
+  currentName: string;
+  onConfirm: (scenarioId: string, newName: string) => void;
+};
+
+export type PaywallFeature =
+  | "scenarios"
+  | "elevations"
+  | "refreshElevations"
+  | "customLayers"
+  | "pipeAttributes"
+  | "zones"
+  | "pipeLibrary"
+  | "customAttributes"
+  | "modelAttributesValidation"
+  | "modelBuilder"
+  | "convertModel";
+
+export type FeaturePaywallDialogState = {
+  type: "featurePaywall";
+  feature: PaywallFeature;
+};
+
+export type ElevationTileErrorsDialogState = {
+  type: "elevationTileErrors";
+  totalCount: number;
+  errors: { fileName: string; error: string }[];
+};
+
+export type GisImportErrorsDialogState = {
+  type: "gisImportErrors";
+  totalCount: number;
+  errors: { fileName: string; error: string }[];
+};
+
+export type FirstScenarioDialogState = {
+  type: "firstScenario";
+  onConfirm: () => void;
+};
+
+export type AlertScenariosNotSavedState = {
+  type: "alertScenariosNotSaved";
+  onContinue: () => void;
+};
+
+export type AlertNetworkRequiredState = {
+  type: "alertNetworkRequired";
+};
+
+export type ActivatingTrialDialogState = {
+  type: "activatingTrial";
+};
+
+export type WaitingForPaymentDialogState = {
+  type: "waitingForPayment";
+};
+
+export type ExportAssetDataDialogState = {
+  type: "exportAssetData";
+};
+
+export type OpenDataTablesDialogState = {
+  type: "openDataTables";
+};
+
+export type ExportTimeSeriesDialogState = {
+  type: "exportTimeSeries";
+};
+
+export type ProfileNoPathDialogState = {
+  type: "profileNoPath";
+};
+
+export type CustomGraphDialogState = {
+  type: "customGraph";
+};
+
+export type AppLoadFailedDialogState = {
+  type: "appLoadFailed";
+  errorMessage?: string;
+};
+
+export type RebuildStorageProgressDialogState = {
+  type: "rebuildStorageProgress";
+  phase: RebuildPhase;
+  outcome?: "memory";
+};
+
+export type DbUnavailableDialogState = {
+  type: "dbUnavailable";
+};
+
+export type PriorityAccessDialogState = {
+  type: "priorityAccess";
+  featureName: string;
+};
+
+export type ImportZonesDialogState = {
+  type: "importZones";
+};
+
+export type ImportZonesWarningDialogState = {
+  type: "importZonesWarning";
+  onContinue: () => void;
+};
+
+export type AllocateCustomerPointsDialogState = {
+  type: "allocateCustomerPoints";
+};
+
+export type AllocateCustomerPointsWarningDialogState = {
+  type: "allocateCustomerPointsWarning";
+  onImport: () => void;
+};
+
+export type RecalculateAllElevationsConfirmDialogState = {
+  type: "recalculateAllElevationsConfirm";
+  onConfirm: () => void;
+};
+
+export type RecomputeElevationsSummary = {
+  reason: "noSources" | "error" | "stopped" | "completed";
+  total: number;
+  resolved: number;
+  unresolved: number;
+};
+
+export type RecomputeElevationsProgressDialogState = {
+  type: "recomputeElevationsProgress";
+  resolved?: number;
+  total?: number;
+  status?: ElevationFetchStatus;
+  onStop?: () => void;
+  summary?: RecomputeElevationsSummary;
+};
+
+export type DialogState =
+  | InvalidFilesErrorDialogState
+  | FileReadErrorDialogState
+  | {
+      type: "cheatsheet";
+    }
+  | UnsavedChangesDialogState
+  | { type: "createNew" }
+  | SimulationSummaryState
+  | SimulationReportDialogState
+  | SimulationOutOfMemoryDialogState
+  | SimulationStorageErrorDialogState
+  | WelcomeDialogState
+  | InpIssuesDialogState
+  | ConvertModelFailedDialogState
+  | ConvertModelIssuesDialogState
+  | { type: "loading" }
+  | AlertInpOutputState
+  | AlertExportInpState
+  | ProjectSavedInfoState
+  | FileFormatUpdatedDialogState
+  | MissingCoordinatesDialogState
+  | MalformedCoordinatesDialogState
+  | UpgradeDialogState
+  | ImportCustomerPointsWizardState
+  | ImportCustomerPointsWarningDialogState
+  | PreSimulationChecksDialogState
+  | UnexpectedErrorDialogState
+  | ChangeNotAppliedDialogState
+  | ModelBuilderIframeDialogState
+  | ModelBuilderV2IframeDialogState
+  | ModelBuilderPaywallDialogState
+  | EarlyAccessDialogState
+  | SimulationProgressDialogState
+  | OpenProjectProgressDialogState
+  | RecalculateAllElevationsConfirmDialogState
+  | RecomputeElevationsProgressDialogState
+  | { type: "simulationSettings" }
+  | { type: "controls" }
+  | PatternsLibraryDialog
+  | PipeLibraryDialogState
+  | PumpLibraryDialogState
+  | CurveLibraryDialogState
+  | CustomAttributesDialogState
+  | DeleteScenarioConfirmationDialogState
+  | RenameScenarioDialogState
+  | FeaturePaywallDialogState
+  | ElevationTileErrorsDialogState
+  | GisImportErrorsDialogState
+  | FirstScenarioDialogState
+  | AlertScenariosNotSavedState
+  | AlertNetworkRequiredState
+  | ActivatingTrialDialogState
+  | WaitingForPaymentDialogState
+  | ExportAssetDataDialogState
+  | OpenDataTablesDialogState
+  | ExportTimeSeriesDialogState
+  | NetworkProjectionDialogState
+  | ProfileNoPathDialogState
+  | CustomGraphDialogState
+  | AppLoadFailedDialogState
+  | RebuildStorageProgressDialogState
+  | DbUnavailableDialogState
+  | PriorityAccessDialogState
+  | ImportZonesDialogState
+  | ImportZonesWarningDialogState
+  | AllocateCustomerPointsDialogState
+  | AllocateCustomerPointsWarningDialogState
+  | null;
+
+export const dialogFromUrl = (): DialogState => {
+  if (typeof window === "undefined") return null;
+
+  const params = new URLSearchParams(window.location.search);
+
+  const dialog = params.get("dialog");
+  if (!dialog) return null;
+
+  return { type: dialog } as DialogState;
+};
+
+export const dialogAtom = atomWithReset<DialogState>(null);

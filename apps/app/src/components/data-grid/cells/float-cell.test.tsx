@@ -1,0 +1,546 @@
+import userEvent from "@testing-library/user-event";
+import { render, screen } from "@testing-library/react";
+import { FloatCell, floatColumn } from "./float-cell";
+
+const setupUser = () => userEvent.setup();
+
+const defaultProps = {
+  value: 1.5,
+  row: {},
+  rowIndex: 0,
+  columnIndex: 0,
+  isActive: false,
+  editMode: false as const,
+  readOnly: false,
+  onChange: vi.fn(),
+  stopEditing: vi.fn(),
+  startEditing: vi.fn(),
+};
+
+describe("FloatCell", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  describe("display mode", () => {
+    it("renders formatted number value", () => {
+      render(<FloatCell {...defaultProps} value={1234.5} />);
+
+      // Intl.NumberFormat formats with locale-specific separators
+      // Now renders as a readonly input
+      expect(screen.getByDisplayValue(/1.*234.*5/)).toBeInTheDocument();
+    });
+
+    it("renders empty string for null value", () => {
+      render(<FloatCell {...defaultProps} value={null} />);
+
+      const input = screen.getByRole("textbox");
+      expect(input).toHaveValue("");
+    });
+
+    it("renders empty string for undefined value", () => {
+      render(
+        <FloatCell {...defaultProps} value={undefined as unknown as null} />,
+      );
+
+      const input = screen.getByRole("textbox");
+      expect(input).toHaveValue("");
+    });
+  });
+
+  describe("edit mode", () => {
+    it("renders input when editMode is set", () => {
+      render(<FloatCell {...defaultProps} editMode="full" />);
+
+      expect(screen.getByRole("textbox")).toBeInTheDocument();
+    });
+
+    it("populates input with formatted value", () => {
+      render(<FloatCell {...defaultProps} value={1234.5} editMode="full" />);
+
+      const input = screen.getByRole("textbox");
+      expect(input).toHaveValue("1,234.5");
+    });
+
+    it("populates input with empty string for null value", () => {
+      render(<FloatCell {...defaultProps} value={null} editMode="full" />);
+
+      const input = screen.getByRole("textbox");
+      expect(input).toHaveValue("");
+    });
+  });
+
+  describe("input handling", () => {
+    it("accepts numeric input", async () => {
+      const user = setupUser();
+
+      render(<FloatCell {...defaultProps} value={0} editMode="full" />);
+
+      const input = screen.getByRole("textbox");
+      await user.clear(input);
+      await user.type(input, "123.45");
+
+      expect(input).toHaveValue("123.45");
+    });
+
+    it("normalizes comma to be kept (comma is allowed)", async () => {
+      const user = setupUser();
+
+      render(<FloatCell {...defaultProps} value={0} editMode="full" />);
+
+      const input = screen.getByRole("textbox");
+      await user.clear(input);
+      await user.type(input, "123,45");
+
+      // Comma is allowed in input (will be normalized on parse)
+      expect(input).toHaveValue("123,45");
+    });
+
+    it("accepts negative numbers", async () => {
+      const user = setupUser();
+
+      render(<FloatCell {...defaultProps} value={0} editMode="full" />);
+
+      const input = screen.getByRole("textbox");
+      await user.clear(input);
+      await user.type(input, "-42.5");
+
+      expect(input).toHaveValue("-42.5");
+    });
+
+    it("filters out letters", async () => {
+      const user = setupUser();
+
+      render(<FloatCell {...defaultProps} value={0} editMode="full" />);
+
+      const input = screen.getByRole("textbox");
+      await user.clear(input);
+      await user.type(input, "12abc34");
+
+      expect(input).toHaveValue("1234");
+    });
+
+    it("does not clear value when typing only non-numeric characters", async () => {
+      const user = setupUser();
+
+      render(<FloatCell {...defaultProps} value={42} editMode="full" />);
+
+      const input = screen.getByRole("textbox");
+      await user.clear(input);
+      await user.type(input, "123");
+      // Select all and type a non-numeric character
+      await user.tripleClick(input);
+      await user.type(input, "x");
+
+      expect(input).toHaveValue("123");
+    });
+
+    it("ignores non-numeric characters appended to existing value", async () => {
+      const user = setupUser();
+
+      render(<FloatCell {...defaultProps} value={5} editMode="full" />);
+
+      const input = screen.getByRole("textbox");
+      await user.type(input, "abc");
+
+      expect(input).toHaveValue("5");
+    });
+
+    it("still allows clearing the field", async () => {
+      const user = setupUser();
+
+      render(<FloatCell {...defaultProps} value={42} editMode="full" />);
+
+      const input = screen.getByRole("textbox");
+      await user.clear(input);
+
+      expect(input).toHaveValue("");
+    });
+
+    it("allows typing valid numbers after rejecting invalid input", async () => {
+      const user = setupUser();
+
+      render(<FloatCell {...defaultProps} value={10} editMode="full" />);
+
+      const input = screen.getByRole("textbox");
+      await user.type(input, "xyz");
+      expect(input).toHaveValue("10");
+
+      await user.clear(input);
+      await user.type(input, "99");
+      expect(input).toHaveValue("99");
+    });
+  });
+
+  describe("value commit", () => {
+    it("commits value on Enter", async () => {
+      const user = setupUser();
+      const onChange = vi.fn();
+      const stopEditing = vi.fn();
+
+      render(
+        <FloatCell
+          {...defaultProps}
+          value={0}
+          editMode="full"
+          onChange={onChange}
+          stopEditing={stopEditing}
+        />,
+      );
+
+      const input = screen.getByRole("textbox");
+      await user.clear(input);
+      await user.type(input, "2.5");
+      await user.keyboard("{Enter}");
+
+      expect(onChange).toHaveBeenCalledWith(2.5);
+      expect(stopEditing).not.toHaveBeenCalled();
+    });
+
+    it("commits value on blur", async () => {
+      const user = setupUser();
+      const onChange = vi.fn();
+      const stopEditing = vi.fn();
+
+      render(
+        <div>
+          <FloatCell
+            {...defaultProps}
+            value={0}
+            editMode="full"
+            onChange={onChange}
+            stopEditing={stopEditing}
+          />
+          <button>Other</button>
+        </div>,
+      );
+
+      const input = screen.getByRole("textbox");
+      await user.clear(input);
+      await user.type(input, "3.14");
+      await user.click(screen.getByRole("button", { name: "Other" }));
+
+      expect(onChange).toHaveBeenCalledWith(3.14);
+      // stopEditing is now handled by the parent (grid), not the cell's blur handler
+    });
+
+    it("parses numbers with period as decimal separator", async () => {
+      const user = setupUser();
+      const onChange = vi.fn();
+
+      render(
+        <FloatCell
+          {...defaultProps}
+          value={0}
+          editMode="full"
+          onChange={onChange}
+          stopEditing={vi.fn()}
+        />,
+      );
+
+      const input = screen.getByRole("textbox");
+      await user.clear(input);
+      await user.type(input, "1.5");
+      await user.keyboard("{Enter}");
+
+      expect(onChange).toHaveBeenCalledWith(1.5);
+    });
+
+    it("skips commit when input is cleared and no emptyValue is configured", async () => {
+      const user = setupUser();
+      const onChange = vi.fn();
+
+      render(
+        <FloatCell
+          {...defaultProps}
+          value={5}
+          editMode="full"
+          onChange={onChange}
+          stopEditing={vi.fn()}
+        />,
+      );
+
+      const input = screen.getByRole("textbox");
+      await user.clear(input);
+      await user.keyboard("{Enter}");
+
+      expect(onChange).not.toHaveBeenCalled();
+    });
+
+    it("commits the configured emptyValue when input is cleared", async () => {
+      const user = setupUser();
+      const onChange = vi.fn();
+
+      render(
+        <FloatCell
+          {...defaultProps}
+          value={5}
+          editMode="full"
+          onChange={onChange}
+          stopEditing={vi.fn()}
+          emptyValue={null}
+        />,
+      );
+
+      const input = screen.getByRole("textbox");
+      await user.clear(input);
+      await user.keyboard("{Enter}");
+
+      expect(onChange).toHaveBeenCalledWith(null);
+    });
+  });
+
+  describe("decimals prop", () => {
+    it("formats display value to the specified number of decimals", () => {
+      render(<FloatCell {...defaultProps} value={1.23456} decimals={2} />);
+
+      expect(screen.getByDisplayValue("1.23")).toBeInTheDocument();
+    });
+
+    it("edit mode initialises with full precision regardless of decimals", () => {
+      render(
+        <FloatCell
+          {...defaultProps}
+          value={1.23456}
+          decimals={2}
+          editMode="full"
+        />,
+      );
+
+      expect(screen.getByRole("textbox")).toHaveValue("1.23456");
+    });
+  });
+
+  describe("readonly prop", () => {
+    it("renders text instead of an input", () => {
+      render(<FloatCell {...defaultProps} value={1.5} readonly />);
+
+      expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+      expect(screen.getByText("1.5")).toBeInTheDocument();
+    });
+
+    it("formats value with the specified decimals", () => {
+      render(
+        <FloatCell {...defaultProps} value={1.23456} decimals={2} readonly />,
+      );
+
+      expect(screen.getByText("1.23")).toBeInTheDocument();
+    });
+
+    it("renders empty for null value", () => {
+      const { container } = render(
+        <FloatCell {...defaultProps} value={null} readonly />,
+      );
+
+      expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+      expect(container.firstChild).toHaveTextContent("");
+    });
+  });
+
+  describe("escape key", () => {
+    it("stops editing without committing", async () => {
+      const user = setupUser();
+      const onChange = vi.fn();
+      const stopEditing = vi.fn();
+
+      render(
+        <FloatCell
+          {...defaultProps}
+          value={5}
+          editMode="full"
+          onChange={onChange}
+          stopEditing={stopEditing}
+        />,
+      );
+
+      const input = screen.getByRole("textbox");
+      await user.clear(input);
+      await user.type(input, "999");
+      await user.keyboard("{Escape}");
+
+      expect(stopEditing).toHaveBeenCalled();
+      // onChange should not be called with 999
+      expect(onChange).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe("floatColumn", () => {
+  describe("column definition", () => {
+    it("creates column with correct properties", () => {
+      const column = floatColumn("price", {
+        header: "Price",
+        size: 100,
+        emptyValue: 0,
+      });
+
+      expect(column).toMatchObject({
+        accessorKey: "price",
+        header: "Price",
+        size: 100,
+        meta: { deleteValue: 0 },
+      });
+    });
+
+    it("leaves deleteValue undefined when emptyValue is not set", () => {
+      const column = floatColumn("value", { header: "Value" });
+
+      expect(column.meta?.deleteValue).toBeUndefined();
+    });
+
+    it("mirrors emptyValue into deleteValue", () => {
+      const column = floatColumn("value", {
+        header: "Value",
+        emptyValue: 0,
+      });
+
+      expect(column.meta?.deleteValue).toBe(0);
+    });
+  });
+
+  describe("copyValue", () => {
+    it("converts number to string", () => {
+      const column = floatColumn("value", { header: "Value" });
+
+      expect(column.meta?.copyValue?.(123.45)).toBe("123.45");
+    });
+
+    it("returns empty string for null", () => {
+      const column = floatColumn("value", { header: "Value" });
+
+      expect(column.meta?.copyValue?.(null)).toBe("");
+    });
+
+    it("respects decimals option", () => {
+      const column = floatColumn("value", { header: "Value", decimals: 2 });
+
+      expect(column.meta?.copyValue?.(1.23456)).toBe("1.23");
+    });
+  });
+
+  describe("readonly option", () => {
+    it("sets meta.isReadOnly", () => {
+      const column = floatColumn("value", {
+        header: "Value",
+        isReadOnly: true,
+      });
+
+      expect(column.meta?.isReadOnly).toBe(true);
+    });
+
+    it("does not set meta.isReadOnly when not readonly", () => {
+      const column = floatColumn("value", { header: "Value" });
+
+      expect(column.meta?.isReadOnly).toBeFalsy();
+    });
+  });
+
+  describe("pasteValue", () => {
+    it("parses valid number string", () => {
+      const column = floatColumn("value", { header: "Value" });
+
+      expect(column.meta?.pasteValue?.("123.45", {} as any)).toBe(123.45);
+    });
+
+    it("parses numbers with thousands separator", () => {
+      const column = floatColumn("value", { header: "Value" });
+
+      // In English locale, comma is thousands separator
+      expect(column.meta?.pasteValue?.("1,234.56", {} as any)).toBe(1234.56);
+    });
+
+    it("returns undefined for invalid string (skip cell)", () => {
+      const column = floatColumn("value", { header: "Value" });
+
+      expect(column.meta?.pasteValue?.("abc", {} as any)).toBeUndefined();
+    });
+
+    it("returns emptyValue for empty string when emptyValue is configured", () => {
+      const column = floatColumn("value", {
+        header: "Value",
+        emptyValue: null,
+      });
+
+      expect(column.meta?.pasteValue?.("", {} as any)).toBeNull();
+    });
+
+    it("returns undefined for empty string when no emptyValue is configured", () => {
+      const column = floatColumn("value", { header: "Value" });
+
+      expect(column.meta?.pasteValue?.("", {} as any)).toBeUndefined();
+    });
+
+    it("parses negative numbers", () => {
+      const column = floatColumn("value", { header: "Value" });
+
+      expect(column.meta?.pasteValue?.("-42.5", {} as any)).toBe(-42.5);
+    });
+
+    it("rejects negative values when validate is non-negative (zero is allowed)", () => {
+      const column = floatColumn("value", {
+        header: "Value",
+        validate: (n) => n >= 0,
+      });
+
+      expect(column.meta?.pasteValue?.("-42.5", {} as any)).toBeUndefined();
+      expect(column.meta?.pasteValue?.("0", {} as any)).toBe(0);
+      expect(column.meta?.pasteValue?.("1.5", {} as any)).toBe(1.5);
+    });
+
+    it("rejects zero when validate enforces non-zero", () => {
+      const column = floatColumn("value", {
+        header: "Value",
+        validate: (n) => n > 0,
+      });
+
+      expect(column.meta?.pasteValue?.("0", {} as any)).toBeUndefined();
+      expect(column.meta?.pasteValue?.("1.5", {} as any)).toBe(1.5);
+    });
+  });
+
+  describe("toDisplay / fromDisplay transforms", () => {
+    const toDisplay = (stored: number) => stored * 10;
+    const fromDisplay = (displayed: number) => displayed / 10;
+
+    it("displays the transformed (display) value", () => {
+      render(<FloatCell {...defaultProps} value={5} toDisplay={toDisplay} />);
+      // stored 5 → displayed 50
+      expect(screen.getByDisplayValue("50")).toBeInTheDocument();
+    });
+
+    it("commits the stored value via fromDisplay", async () => {
+      const user = setupUser();
+      const onChange = vi.fn();
+      render(
+        <FloatCell
+          {...defaultProps}
+          value={5}
+          editMode="full"
+          onChange={onChange}
+          toDisplay={toDisplay}
+          fromDisplay={fromDisplay}
+        />,
+      );
+
+      const input = screen.getByRole("textbox");
+      expect(input).toHaveValue("50"); // edits in display space
+      await user.clear(input);
+      await user.type(input, "70");
+      await user.keyboard("{Enter}");
+
+      // typed display 70 → stored 7
+      expect(onChange).toHaveBeenCalledWith(7);
+    });
+
+    it("round-trips through the column copy/paste using the transforms", () => {
+      const column = floatColumn("value", {
+        header: "Value",
+        toDisplay,
+        fromDisplay,
+      });
+      // copy shows the display value; paste stores the raw value
+      expect(column.meta?.copyValue?.(5)).toMatch(/50/);
+      expect(column.meta?.pasteValue?.("70", {} as any)).toBe(7);
+    });
+  });
+});

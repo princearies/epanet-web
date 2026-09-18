@@ -1,0 +1,111 @@
+import * as Comlink from "comlink";
+
+import { AssetId } from "@epanet-js/hydraulic-model";
+import { HydraulicModel } from "src/hydraulic-model/hydraulic-model";
+import { ResultsReader } from "@epanet-js/simulation";
+import { canUseWorker, enrichWorkerError } from "src/infra/worker";
+import { encodeTraceData } from "./encode-trace-buffers";
+import {
+  flowDirectionTransferables,
+  allowedFlowDirectionTransferables,
+} from "./trace-buffers";
+import { topologyTransferables } from "src/hydraulic-model/topology/topology-transferable";
+import { assetIndexTransferables } from "src/hydraulic-model/asset-index-transferable";
+import { FlowDirection } from "./flow-direction";
+import { AllowedFlowDirection } from "./allowed-flow-direction";
+import { TraceMode, TraceStart, TraceResult } from "./types";
+import { boundaryTrace } from "./boundary-trace";
+import { upstreamTrace } from "./upstream-trace";
+import { downstreamTrace } from "./downstream-trace";
+import { getTraceWorker } from "./get-worker";
+
+export interface TraceInput {
+  mode: TraceMode;
+  startNodeIds: AssetId[];
+  startLinkIds: AssetId[];
+}
+
+export const runTrace = async (
+  hydraulicModel: HydraulicModel,
+  resultsReader: ResultsReader | null,
+  input: TraceInput,
+  signal?: AbortSignal,
+): Promise<AssetId[]> => {
+  if (signal?.aborted) {
+    throw new DOMException("Operation cancelled", "AbortError");
+  }
+
+  const effectiveResultsReader =
+    input.mode === "boundary" ? null : resultsReader;
+
+  const result = canUseWorker()
+    ? await runWithWorker(hydraulicModel, effectiveResultsReader, input, signal)
+    : runSync(hydraulicModel, effectiveResultsReader, input);
+
+  return [...result.nodeIds, ...result.linkIds];
+};
+
+function runSync(
+  model: HydraulicModel,
+  resultsReader: ResultsReader | null,
+  input: TraceInput,
+): TraceResult {
+  const status = new FlowDirection(model.assets, resultsReader);
+  const allowedFlowDirection = new AllowedFlowDirection(
+    model.assets,
+    resultsReader,
+  );
+  const start: TraceStart = {
+    nodeIds: input.startNodeIds,
+    linkIds: input.startLinkIds,
+  };
+
+  switch (input.mode) {
+    case "boundary":
+      return boundaryTrace(
+        start,
+        model.topology,
+        model.assetIndex,
+        allowedFlowDirection,
+      );
+    case "upstream":
+      return upstreamTrace(start, model.topology, status);
+    case "downstream":
+      return downstreamTrace(start, model.topology, status);
+  }
+}
+
+const runWithWorker = async (
+  model: HydraulicModel,
+  resultsReader: ResultsReader | null,
+  input: TraceInput,
+  signal?: AbortSignal,
+): Promise<TraceResult> => {
+  if (signal?.aborted) {
+    throw new DOMException("Operation cancelled", "AbortError");
+  }
+
+  const data = encodeTraceData(model, resultsReader, "array");
+  const start: TraceStart = {
+    nodeIds: input.startNodeIds,
+    linkIds: input.startLinkIds,
+  };
+  const transferData = Comlink.transfer(data, [
+    ...topologyTransferables(data.topologyBuffers),
+    ...assetIndexTransferables(data.assetIndexBuffers),
+    ...flowDirectionTransferables(data.flowDirectionBuffers),
+    ...allowedFlowDirectionTransferables(data.allowedFlowDirectionBuffers),
+  ]);
+
+  const workerAPI = getTraceWorker();
+  try {
+    const result = await workerAPI.runTrace(input.mode, start, transferData);
+    if (signal?.aborted) {
+      throw new DOMException("Operation cancelled", "AbortError");
+    }
+    return result;
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") throw e;
+    throw enrichWorkerError("trace", e);
+  }
+};

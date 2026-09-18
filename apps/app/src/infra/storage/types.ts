@@ -1,0 +1,34 @@
+export interface IKeyBufferStore {
+  save(key: string, data: ArrayBuffer): Promise<void>;
+
+  readSlice(key: string, offset: number, length: number): Promise<ArrayBuffer>;
+
+  readBlockSeries(
+    key: string,
+    baseOffset: number,
+    readSize: number,
+    blockSize: number,
+    blockCount: number,
+  ): Promise<ArrayBuffer>;
+
+  getFile(key: string): Promise<File>;
+
+  getSize(key: string): Promise<number>;
+
+  clear(): Promise<void>;
+
+  clearRun(): Promise<void>;
+}
+
+export interface IKeyValueStore {
+  getAll<T>(storeName: string): Promise<T[]>;
+  get<T>(storeName: string, key: string): Promise<T | undefined>;
+  put<T>(storeName: string, value: T): Promise<void>;
+  delete(storeName: string, key: string): Promise<void>;
+  batch(
+    storeName: string,
+    ops: Array<
+      { type: "put"; value: unknown } | { type: "delete"; key: string }
+    >,
+  ): Promise<void>;
+}
