@@ -19,11 +19,6 @@ import { Section, InlineField } from "src/components/form/fields";
 import { NumericField } from "src/components/form/numeric-field";
 import { EditableTextField } from "src/components/form/editable-text-field";
 import {
-  PaywallLockButton,
-  PaywallOverlay,
-  useFeatureLock,
-} from "src/components/form/paywall";
-import {
   buildCustomAttributeStats,
   buildCustomAttributeSummary,
 } from "./custom-attributes-stats";
@@ -110,8 +105,6 @@ const MultiCustomAttributeRow = ({
   const translate = useTranslate();
   const { units, formatting } = useAtomValue(projectSettingsAtom);
   const { assets } = useAtomValue(stagingModelDerivedAtom);
-  const { isLocked } = useFeatureLock("customAttributes");
-  const paywall = isLocked ? "customAttributes" : undefined;
 
   const valuesById = assetIds.map(
     (id) =>
@@ -179,26 +172,10 @@ const MultiCustomAttributeRow = ({
     );
 
   return (
-    <InlineField
-      name={attribute.label}
-      labelSize="md"
-      labelAction={
-        paywall ? (
-          <PaywallLockButton feature={paywall} label={attribute.label} />
-        ) : undefined
-      }
-    >
+    <InlineField name={attribute.label} labelSize="md">
       <div className="flex items-center gap-1">
         {statsButton}
-        <div className="flex-1 min-w-0">
-          {paywall ? (
-            <PaywallOverlay feature={paywall} ariaLabel={attribute.label}>
-              {field}
-            </PaywallOverlay>
-          ) : (
-            field
-          )}
-        </div>
+        <div className="flex-1 min-w-0">{field}</div>
       </div>
     </InlineField>
   );

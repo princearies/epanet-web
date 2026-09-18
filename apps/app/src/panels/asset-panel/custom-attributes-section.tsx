@@ -20,7 +20,8 @@ import {
 import { stagingModelDerivedAtom } from "src/state/derived-branch-state";
 import { NumericField } from "src/components/form/numeric-field";
 import { EditableTextField } from "src/components/form/editable-text-field";
-import { PaywalledInlineField, SectionWrapper } from "./ui-components";
+import { InlineField } from "src/components/form/fields";
+import { SectionWrapper } from "./ui-components";
 
 type OnPropertyChange = <P extends ChangeableProperty>(
   name: P,
@@ -115,12 +116,11 @@ const CustomAttributeRow = ({
     : undefined;
 
   return (
-    <PaywalledInlineField
+    <InlineField
       name={attribute.label}
       labelSize="md"
       hasChanged={comparison.hasChanged}
       baseDisplayValue={baseDisplayValue}
-      paywall="customAttributes"
     >
       {attribute.type === "number" ? (
         <NumericField
@@ -145,6 +145,6 @@ const CustomAttributeRow = ({
           styleOptions={{ padding: "md", textSize: "sm" }}
         />
       )}
-    </PaywalledInlineField>
+    </InlineField>
   );
 };

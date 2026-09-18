@@ -199,6 +199,24 @@ describe("AssetDataTable", () => {
     expect(screen.queryByDisplayValue("J1")).not.toBeInTheDocument();
   });
 
+  it("filters visible rows by label and displayed property values", async () => {
+    const hydraulicModel = HydraulicModelBuilder.with()
+      .aJunction(1, { label: "North", elevation: 25 })
+      .aJunction(2, { label: "South", elevation: 40 })
+      .build();
+    const store = setInitialState({ hydraulicModel });
+
+    renderTable(store);
+    expect(await screen.findByDisplayValue("North")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("South")).toBeInTheDocument();
+
+    const search = screen.getByRole("searchbox", { name: "Search assets" });
+    await userEvent.setup().type(search, "40");
+
+    expect(screen.queryByDisplayValue("North")).not.toBeInTheDocument();
+    expect(screen.getByDisplayValue("South")).toBeInTheDocument();
+  });
+
   it("writes an edit in a scoped table to the right asset", async () => {
     const user = setupUser();
     const hydraulicModel = HydraulicModelBuilder.with()
@@ -248,8 +266,7 @@ describe("AssetDataTable", () => {
     expect(screen.getByText("Score")).toBeInTheDocument();
   });
 
-  it("locks custom-attribute columns and opens the paywall for a free plan", async () => {
-    const user = setupUser();
+  it("allows custom-attribute columns on a free plan without a paywall", async () => {
     const hydraulicModel = HydraulicModelBuilder.with()
       .aCustomAttribute("junction", {
         id: "custom-1",
@@ -264,17 +281,11 @@ describe("AssetDataTable", () => {
     renderTable(store, aUser({ plan: "free" }));
 
     await screen.findByText("Zone");
-    // Read-only cells render the value as static text rather than an input.
-    expect(screen.queryByDisplayValue("A")).not.toBeInTheDocument();
-
-    const locks = screen.getAllByRole("button", { name: "Paid feature" });
-    expect(locks.length).toBeGreaterThan(0);
-
-    await user.click(locks[0]);
-    expect(store.get(dialogAtom)).toEqual({
-      type: "featurePaywall",
-      feature: "customAttributes",
-    });
+    expect(await screen.findByDisplayValue("A")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /paywall/i }),
+    ).not.toBeInTheDocument();
+    expect(store.get(dialogAtom)).toBeNull();
   });
 
   it("edits a custom-attribute value and writes it back to the model", async () => {

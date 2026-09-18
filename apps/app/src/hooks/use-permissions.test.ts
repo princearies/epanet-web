@@ -10,10 +10,10 @@ describe("resolvePermissions", () => {
     expect(p.canUseElevations).toBe(false);
     expect(p.canUseZones).toBe(false);
     expect(p.canUseControls).toBe(false);
-    expect(p.canUsePipeAttributes).toBe(false);
-    expect(p.canValidateModelAttributes).toBe(false);
+    expect(p.canUsePipeAttributes).toBe(true);
+    expect(p.canValidateModelAttributes).toBe(true);
     expect(p.canUsePipeLibrary).toBe(false);
-    expect(p.canUseCustomAttributes).toBe(false);
+    expect(p.canUseCustomAttributes).toBe(true);
     expect(p.canImportSynergi).toBe(false);
     expect(p.canUpgrade).toBe(true);
     expect(p.canManageOrganization).toBe(false);
@@ -77,7 +77,7 @@ describe("resolvePermissions", () => {
     expect(p.canAddCustomLayers).toBe(false);
     expect(p.canUseScenarios).toBe(false);
     expect(p.canUseElevations).toBe(false);
-    expect(p.canValidateModelAttributes).toBe(false);
+    expect(p.canValidateModelAttributes).toBe(true);
     expect(p.canImportSynergi).toBe(false);
     expect(p.canUpgrade).toBe(true);
   });

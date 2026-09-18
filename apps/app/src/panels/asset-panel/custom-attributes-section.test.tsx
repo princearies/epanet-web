@@ -23,7 +23,6 @@ import { USelection } from "src/selection";
 import { stubUserTracking } from "src/__helpers__/user-tracking";
 import { AuthMockProvider, aUser } from "src/__helpers__/auth-mock";
 import type { User } from "src/auth-types";
-import { dialogAtom } from "src/state/dialog";
 import FeatureEditor from "../feature-editor";
 
 const IDS = { J1: 1 };
@@ -167,32 +166,13 @@ describe("CustomAttributesSection scenario highlighting", () => {
   });
 });
 
-describe("CustomAttributesSection paywall", () => {
-  it("shows a padlock and keeps the value read-only for a free plan", () => {
+describe("CustomAttributesSection local access", () => {
+  it("allows editing for a free plan without a paywall", () => {
     const store = setMainState({ hydraulicModel: buildModel(10) });
 
     renderComponent(store, aUser({ plan: "free" }));
 
-    expect(
-      screen.getAllByRole("button", { name: "Paid feature: Age" }).length,
-    ).toBeGreaterThan(0);
     expect(screen.getByLabelText(/value for: Age/i)).toHaveValue("10");
-  });
-
-  it("opens the custom-attributes paywall when the padlock is clicked", async () => {
-    const user = userEvent.setup();
-    const store = setMainState({ hydraulicModel: buildModel(10) });
-
-    renderComponent(store, aUser({ plan: "free" }));
-
-    await user.click(
-      screen.getAllByRole("button", { name: "Paid feature: Age" })[0],
-    );
-
-    expect(store.get(dialogAtom)).toEqual({
-      type: "featurePaywall",
-      feature: "customAttributes",
-    });
   });
 
   it("does not show a padlock for a paid plan", () => {

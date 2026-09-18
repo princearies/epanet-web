@@ -31,6 +31,10 @@ export const resolvePermissions = (
 ): Permissions => {
   const hasPaidAccess =
     ["pro", "education", "personal", "teams"].includes(plan) || trialActive;
+  // These capabilities are part of the standalone editor and are not
+  // subscription features. Keep them in the permission API for callers, but
+  // make their local availability explicit.
+  const standaloneLocalAccess = true;
   return {
     canAddCustomLayers: hasPaidAccess,
     canUseScenarios: hasPaidAccess,
@@ -38,11 +42,11 @@ export const resolvePermissions = (
     canRefreshElevations: hasPaidAccess,
     canUseZones: hasPaidAccess || isDemoNetwork,
     canUseControls: hasPaidAccess || isDemoNetwork,
-    canUsePipeAttributes: hasPaidAccess || isDemoNetwork,
+    canUsePipeAttributes: standaloneLocalAccess,
     canUseModelBuildV2: ["pro", "teams"].includes(plan) || trialActive,
-    canValidateModelAttributes: hasPaidAccess,
+    canValidateModelAttributes: standaloneLocalAccess,
     canUsePipeLibrary: hasPaidAccess || isDemoNetwork,
-    canUseCustomAttributes: hasPaidAccess || isDemoNetwork,
+    canUseCustomAttributes: standaloneLocalAccess,
     canImportSynergi: hasPaidAccess,
     canUpgrade: plan === "free",
     canManageOrganization: isOrgAdmin,

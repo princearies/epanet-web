@@ -17,10 +17,8 @@ import { changeCustomerPointProperty } from "src/hydraulic-model/model-operation
 import { stagingModelDerivedAtom } from "src/state/derived-branch-state";
 import { NumericField } from "src/components/form/numeric-field";
 import { EditableTextField } from "src/components/form/editable-text-field";
-import {
-  PaywalledInlineField,
-  SectionWrapper,
-} from "./asset-panel/ui-components";
+import { SectionWrapper } from "./asset-panel/ui-components";
+import { InlineField } from "src/components/form/fields";
 
 export const CustomerPointCustomAttributesSection = ({
   customerPoint,
@@ -122,12 +120,11 @@ const CustomAttributeRow = ({
     : undefined;
 
   return (
-    <PaywalledInlineField
+    <InlineField
       name={attribute.label}
       labelSize="md"
       hasChanged={comparison.hasChanged}
       baseDisplayValue={baseDisplayValue}
-      paywall="customAttributes"
     >
       {attribute.type === "number" ? (
         <NumericField
@@ -154,6 +151,6 @@ const CustomAttributeRow = ({
           styleOptions={{ padding: "md", textSize: "sm" }}
         />
       )}
-    </PaywalledInlineField>
+    </InlineField>
   );
 };

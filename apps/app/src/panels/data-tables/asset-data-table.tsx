@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAtomValue, useSetAtom } from "jotai";
 import { dialogAtom } from "src/state/dialog";
 import {
@@ -55,8 +55,7 @@ import { useZoomTo } from "src/hooks/use-zoom-to";
 import { USelection } from "src/selection";
 import { useDeleteAssets } from "src/commands/delete-assets";
 import { useUserTracking } from "src/infra/user-tracking";
-import { DeleteIcon, PaywallLockIcon, PointerClickIcon } from "src/icons";
-import { useFeatureLock } from "src/components/form/paywall";
+import { DeleteIcon, PointerClickIcon } from "src/icons";
 import { RingSpinner } from "src/components/ring-spinner";
 import { notify } from "src/components/notifications";
 import { useTranslate } from "src/hooks/use-translate";
@@ -101,6 +100,7 @@ export const AssetDataTable = memo(function AssetDataTableInner({
   assetIds,
 }: AssetDataTableProps) {
   const dataGridRef = useRef<DataGridRef>(null);
+  const [filter, setFilter] = useState("");
   const [savedState, saveState] = usePanelGridState(id, type);
 
   const registerHandle = useSetAtom(registerTableHandleAtom);
@@ -145,7 +145,6 @@ export const AssetDataTable = memo(function AssetDataTableInner({
     [assetType, hydraulicModel, scopedIds],
   );
   const rowsRef = useRef(rows);
-  rowsRef.current = rows;
 
   const hasSimulation = simulation !== null;
 
@@ -177,14 +176,6 @@ export const AssetDataTable = memo(function AssetDataTableInner({
   // Defer mounting the grid so switching tabs stays responsive.
   const gridReady = useDeferredGridMount();
 
-  const {
-    isLocked: pipeAttributesLocked,
-    openPaywall: openPipeAttributesPaywall,
-  } = useFeatureLock("pipeAttributes");
-  const {
-    isLocked: customAttributesLocked,
-    openPaywall: openCustomAttributesPaywall,
-  } = useFeatureLock("customAttributes");
   const pipeMaterials = useMemo(
     () =>
       assetType === "pipe"
@@ -210,21 +201,9 @@ export const AssetDataTable = memo(function AssetDataTableInner({
     const validateLabel = (label: string, row: AssetRow) =>
       labelManager.isLabelAvailable(label, assetType, row.id);
     const getRow = (rowIndex: number) => rowsRef.current?.[rowIndex];
-    const lock = pipeAttributesLocked
-      ? {
-          openPaywall: openPipeAttributesPaywall,
-          icon: <PaywallLockIcon />,
-        }
-      : undefined;
-    const customAttributesLock = customAttributesLocked
-      ? {
-          openPaywall: openCustomAttributesPaywall,
-          icon: <PaywallLockIcon />,
-        }
-      : undefined;
     return buildColumns(
       pipeMaterials,
-      lock,
+      undefined,
       assetType,
       translate,
       hasSimulation,
@@ -239,17 +218,13 @@ export const AssetDataTable = memo(function AssetDataTableInner({
       getRow,
       accessorCtx,
       customAttributes,
-      customAttributesLock,
+      undefined,
       labelMaxLength,
       inferRoughness,
       isRemoteSetpointPrvOn,
     );
   }, [
     assetType,
-    pipeAttributesLocked,
-    openPipeAttributesPaywall,
-    customAttributesLocked,
-    openCustomAttributesPaywall,
     pipeMaterials,
     formatting,
     hasSimulation,
@@ -267,6 +242,32 @@ export const AssetDataTable = memo(function AssetDataTableInner({
     inferRoughness,
     isRemoteSetpointPrvOn,
   ]);
+
+  const visibleRows = useMemo(() => {
+    const query = filter.trim().toLocaleLowerCase();
+    if (!query) return rows;
+    return rows.filter((row, rowIndex) => {
+      const values: unknown[] = Object.values(row);
+      const asset = hydraulicModel.assets.get(row.id);
+      for (const attribute of customAttributes) {
+        values.push(asset?.getProperty(attribute.id));
+      }
+      for (const column of columns) {
+        const definition = column as {
+          accessorKey?: string;
+          accessorFn?: (row: AssetRow, index: number) => unknown;
+        };
+        if (definition.accessorKey) values.push(row[definition.accessorKey]);
+        if (definition.accessorFn)
+          values.push(definition.accessorFn(row, rowIndex));
+      }
+      return values.some(
+        (value) =>
+          value != null && String(value).toLocaleLowerCase().includes(query),
+      );
+    });
+  }, [columns, customAttributes, filter, hydraulicModel.assets, rows]);
+  rowsRef.current = visibleRows;
 
   const onChange = useCallback(
     async (newRows: AssetRow[]) => {
@@ -710,7 +711,17 @@ export const AssetDataTable = memo(function AssetDataTableInner({
   );
 
   return (
-    <div className="flex-1 min-h-0 relative">
+    <div className="flex-1 min-h-0 relative flex flex-col">
+      <div className="shrink-0 p-2">
+        <input
+          type="search"
+          aria-label="Search assets"
+          placeholder="Search assets"
+          value={filter}
+          onChange={(event) => setFilter(event.target.value)}
+          className="w-full rounded border border-subtle bg-base px-2 py-1 text-size-small"
+        />
+      </div>
       {!gridReady ? (
         <div className="absolute inset-0 flex items-center justify-center">
           <RingSpinner size="lg" />
@@ -720,7 +731,7 @@ export const AssetDataTable = memo(function AssetDataTableInner({
           ref={dataGridRef}
           initialGridState={savedState}
           key={assetType}
-          data={rows}
+          data={visibleRows}
           columns={columns}
           onChange={onChange}
           createRow={() => ({}) as AssetRow}

@@ -919,7 +919,6 @@ const PipeEditor = ({
           comparison={getComparison("year", pipe.year ?? null)}
           onChange={onPropertyChange}
           readOnly={readonly}
-          paywall="pipeAttributes"
           validate={fieldValidator("pipe", "year")}
         />
         <QuantityRow
@@ -3026,8 +3025,7 @@ const ChemicalSourceEditor = ({
 
     if (typeComparison.hasChanged) {
       const baseType = typeComparison.baseValue as
-        | ChemicalSourceType
-        | undefined;
+        ChemicalSourceType | undefined;
       const baseLabel = baseType
         ? translate(`source.${baseType}`)
         : `(${translate("none").toLocaleLowerCase()})`;
