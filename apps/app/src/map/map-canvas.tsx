@@ -53,6 +53,7 @@ import { useTranslate } from "src/hooks/use-translate";
 import { supportEmail } from "src/global-config";
 import { MapHandlers } from "@epanet-js/map";
 import { useIsEditionBlocked } from "src/hooks/use-is-edition-blocked";
+import { LeafletPreview } from "./leaflet-preview";
 mapboxgl.accessToken = env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
 mapboxgl.setRTLTextPlugin(
@@ -136,6 +137,9 @@ export const MapCanvas = memo(function MapCanvas({
   const cursor = useAtomValue(cursorStyleAtom);
   const isEditionBlocked = useIsEditionBlocked();
   const [initError, setInitError] = useState<boolean>(false);
+  const [mapProvider, setMapProvider] = useState<"mapbox" | "leaflet">(
+    "mapbox",
+  );
 
   // Refs
   const mapRef: React.MutableRefObject<MapEngine | null> =
@@ -160,6 +164,14 @@ export const MapCanvas = memo(function MapCanvas({
   );
 
   useEffect(() => {
+    if (mapProvider === "leaflet") {
+      if (mapRef.current) {
+        mapRef.current.remove();
+        mapRef.current = null;
+        setMap(null);
+      }
+      return;
+    }
     if (mapRef.current) return;
     if (!mapDivRef.current || !mapHandlers) return;
 
@@ -186,7 +198,7 @@ export const MapCanvas = memo(function MapCanvas({
       }
       mapRef.current = null;
     };
-  }, [mapRef, mapDivRef, setMap, onControlClick, readViewport]);
+  }, [mapRef, mapDivRef, setMap, onControlClick, readViewport, mapProvider]);
 
   if (isDebugOn) (window as any).mapEngine = mapRef.current;
 
@@ -405,13 +417,33 @@ export const MapCanvas = memo(function MapCanvas({
   return (
     <CM.Root modal={false} onOpenChange={onOpenChange}>
       <MapStateUpdates map={mapRef.current} />
-      <CM.Trigger asChild onContextMenu={onContextMenu}>
-        <div
-          className={clsx("w-full h-full mapboxgl-map", cursorStyle)}
-          ref={mapDivRef}
-          data-testid="map"
-        ></div>
-      </CM.Trigger>
+      <div className="absolute z-10 top-2 left-2 rounded bg-white/95 p-1 shadow">
+        <label className="sr-only" htmlFor="map-provider">
+          Map provider
+        </label>
+        <select
+          id="map-provider"
+          className="rounded border border-gray-300 px-2 py-1 text-xs"
+          value={mapProvider}
+          onChange={(event) =>
+            setMapProvider(event.target.value as "mapbox" | "leaflet")
+          }
+        >
+          <option value="mapbox">Deck.gl / Mapbox (editing)</option>
+          <option value="leaflet">Leaflet (preview)</option>
+        </select>
+      </div>
+      {mapProvider === "leaflet" ? (
+        <LeafletPreview hydraulicModel={hydraulicModel} />
+      ) : (
+        <CM.Trigger asChild onContextMenu={onContextMenu}>
+          <div
+            className={clsx("w-full h-full mapboxgl-map", cursorStyle)}
+            ref={mapDivRef}
+            data-testid="map"
+          ></div>
+        </CM.Trigger>
+      )}
       <MapContextMenu contextInfo={contextInfo} />
       <Hints />
       <SatelliteToggle />
