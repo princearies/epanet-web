@@ -6,7 +6,8 @@
     "check-types": "turbo run check-types",
     "lint": "turbo run lint",
     "test": "turbo run test",
-    "build": "pnpm --filter @epanet-js/app build"
+    "build": "pnpm --filter @epanet-js/app build",
+    "build:worker": "pnpm --filter @epanet-js/app open-next:build"
   },
   "engines": {
     "node": "20.x || 21.x",

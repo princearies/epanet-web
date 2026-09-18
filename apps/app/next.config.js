@@ -9,7 +9,6 @@ const commitSha = process.env.VERCEL_GIT_COMMIT_SHA || "development";
 const nextConfig = {
   deploymentId: process.env.NEXT_DEPLOYMENT_ID,
   compress: false,
-  swcMinify: true,
   poweredByHeader: false,
   transpilePackages: [
     "echarts",
@@ -133,3 +132,7 @@ if (process.env.NEXT_PUBLIC_SENTRY_PROXY === "true") {
 }
 
 module.exports = withSentryConfig(nextConfig, sentryConfig);
+
+
+
+

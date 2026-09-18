@@ -76,3 +76,7 @@ Thumbs.db
 .eslintcache
 *.patch
 specs/
+
+.open-next
+.wrangler
+
